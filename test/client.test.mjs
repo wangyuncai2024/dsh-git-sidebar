@@ -2852,6 +2852,109 @@ test('client standalone：拿不到 sessionId 时退回旧启发式（不至于�
   )
 })
 
+test('client standalone：窄栏下分支名与「⋯」是两段可换行的行（不把名字挤没）', async () => {
+  // 现场：右侧栏可拖到 RIGHTBAR_MIN=300。不换行时固定不动的「⋯」先占位，
+  // 分支名被压到 28px（实测渲染成 `for...`）——整块面板最该看清的一项反而看不清。
+  // 现在这一行是 S.rowWrap：左半（点 + 名字 + 跟踪标签）会占满整行，
+  // 右半（⋯）在放不下时整组掉到第二行。
+  const harness = makeFakeWindow({
+    stateResponse: REPO_WITH_CHANGES,
+    // 打开分支管理器会发一条 branches op：本地分支行要靠它才有内容。
+    opResponses: {
+      branches: {
+        ok: true,
+        branches: {
+          current: 'feature/a-rather-long-branch-name',
+          items: [
+            { name: 'feature/a-rather-long-branch-name', current: true },
+            { name: 'main', current: false },
+          ],
+        },
+        remoteBranches: { defaultRef: null, items: [] },
+        branchUpstreams: {
+          'feature/a-rather-long-branch-name': { upstream: null, ahead: 0, behind: 0, gone: false },
+        },
+        state: null,
+      },
+    },
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const initial = await react.settle()
+  const manage = findButton(initial, '管理')
+  assert.ok(manage !== undefined, '应渲染出「管理」按钮')
+  await manage.props.onClick()
+  const opened = await react.settle()
+
+  // 分支行：带 dgs-track 类的那几行（改动清单的行也带 dgs-rowitem，
+  // 但只有分支行有跟踪标签，用它把两类行区分开）。
+  const rows = flattenTree(opened).filter((node) =>
+    node !== null && typeof node === 'object' && node.props !== undefined
+    && typeof node.props.className === 'string'
+    && node.props.className.split(' ').includes('dgs-rowitem')
+    && flattenTree(node).some((inner) => inner !== null && typeof inner === 'object'
+      && inner.props !== undefined && inner.props.className === 'dgs-track'))
+  assert.ok(rows.length > 0, '应有本地分支行')
+  const row = rows[0]
+  assert.equal(row.props.style.flexWrap, 'wrap', '分支行必须允许换行（窄栏下让名字拿整行）')
+  // 行的直接子节点应当是「左半 + 右半」两段，而不是把名字和按钮平铺在一起。
+  const kids = (row.children ?? []).filter((child) => child !== null && typeof child === 'object' && child.props !== undefined)
+  assert.equal(kids.length, 2, '分支行应当是「左半 + 右半」两段')
+  assert.ok(
+    kids.some((child) => child.props.style.flex === '0 0 auto'),
+    '右半（⋯ 那一组）要 flex 0 0 auto：不许被压扁，放不下就整组换行',
+  )
+  assert.ok(
+    kids.some((child) => child.props.style.flex === '1 1 auto'),
+    '左半（名字那一组）要 flex 1 1 auto：占满整行',
+  )
+})
+
+test('client standalone：「分支」那一行也是可换行的（窄栏下按钮掉到第二行）', async () => {
+  const harness = makeFakeWindow({ stateResponse: REPO_WITH_CHANGES })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const tree = await react.settle()
+  // 这一行是「分支 <名字> → <上游> …… 领先/落后 [管理]」。
+  const row = flattenTree(tree).find((node) =>
+    node !== null && typeof node === 'object' && node.props !== undefined
+    && Array.isArray(node.children)
+    && typeof textOf(node) === 'string'
+    && textOf(node).startsWith('分支')
+    && node.props.style !== undefined
+    && node.props.style.flexWrap === 'wrap')
+  assert.ok(row !== undefined, '「分支」行必须允许换行（否则 300px 下分支名被压成 for...）')
+  // 名字那一项要有最小宽度，不能缩成几个字符。
+  const nameSpan = flattenTree(row).find((node) =>
+    node !== null && typeof node === 'object' && node.type === 'span'
+    && typeof node.props.title === 'string' && node.props.title.startsWith('当前分支'))
+  assert.ok(nameSpan !== undefined, '找不到分支名那一段')
+  assert.ok(
+    typeof nameSpan.props.style.minWidth === 'string' && nameSpan.props.style.minWidth.endsWith('em'),
+    '分支名要给一个最小宽度（4em 档），否则会被压到只剩省略号：' + nameSpan.props.style.minWidth,
+  )
+})
+
+test('client standalone：面板仍是「铺满框」而不是浮窗（回归：别把 fixed 加回来）', async () => {
+  // 这一条同时钉住两个方向：面板不能自己定位（那是旧版浮窗的做法），
+  // 也不能没有高度约束（那样正文一长就把整列顶开）。
+  const harness = makeFakeWindow({ stateResponse: REPO_WITH_CHANGES })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const tree = await react.settle()
+  const panel = findByClass(tree, 'dgs-panel')
+  assert.equal(panel.props.style.position, undefined, '不允许自己定位')
+  assert.equal(panel.props.style.height, '100%', '必须铺满给定的框')
+  assert.equal(panel.props.style.minHeight, 0, 'flex 子项要能收缩，否则正文撑开会顶开整列')
+  // 旧版浮窗的那几样东西都不该再出现。
+  for (const key of ['right', 'bottom', 'zIndex', 'boxShadow', 'borderRadius', 'maxHeight']) {
+    assert.equal(panel.props.style[key], undefined, '不该再有浮窗属性 ' + key)
+  }
+})
+
 // ── 本地分支名 ≠ 上游分支名：提前说 / 就地拦（本次的真实现场） ──────────────
 //
 // 现场：本地 `origin-main` 跟踪 `origin/main`。用户点了「推送」才看到一句
