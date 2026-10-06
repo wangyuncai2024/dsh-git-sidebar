@@ -1,0 +1,13 @@
+node_modules/
+pnpm-lock.yaml
+.DS_Store
+
+# 插件操作日志：固定落在插件仓库根目录（lib/log.js 用 import.meta.url 推导，
+# 不跟 process.cwd() 走）—— 只在本机看，不入库。
+/git-sidebar.log
+/git-sidebar.log.1
+*.log
+
+# 版面自查（不进仓库）：用假 React 驱动真实 client bundle、headless Chrome 截图。
+# 目录已清空删除；将来重建（preview.cjs + light/dark/tall 截图）也照样不入库。
+/.ui-preview/

@@ -1,0 +1,27 @@
+# ============================================================================
+# dsh-git-sidebar —— Git 面板插件 · bundle patch（挂载声明）
+# ============================================================================
+# 本文件随插件包分发：DSH 启动时按 bundle 层栈叠加各插件 patch，
+# 这一层把本插件插入 Web profile 的配置树。
+#
+# 安装：
+#   cd <插件根目录> && dsh plugin --profile web add "link:$PWD"
+#   # 不需要手改 profile 的 package.json：dsh plugin 会把依赖写进 profile，
+#   # 并把「声明了 dsh.bundle.patch 的依赖」自动登记进 dsh.profile.bundles
+#   #（dsh plugin 的 reconcilePlugins；卸载时同样会自动移除）。
+#   # bundles 是启动时读取的，所以首次安装 / 卸载后要重启一次 dsh。
+#
+# 卸载：
+#   dsh plugin --profile web remove dsh-git-sidebar
+#
+# 可用行配置（在 profile 的 cordis.patch.yml 里用同一个 id 覆盖）：
+#   defaultDir: ''          # 面板默认操作的目录；留空 = 跟随当前会话工作目录
+#   logLevel: 'info'        # 日志级别：off | error | warn | info | debug（默认 info）
+#   logMaxBytes: 2097152    # 日志轮转上限（超过后旧文件改名 .1，只留两份）
+#   logFile: ''             # 日志文件路径；留空 = 本插件仓库根目录下的 git-sidebar.log
+#
+# 注：网络加速（镜像 / 代理）不走这里，见 $DSH_HOME/git-sidebar-net.json —— 面板的 🌐
+# 按钮读写它；那个设置要能随时改，不该逼用户回来编辑本文件再重启。
+- insert:
+    - id: git-sidebar
+      name: 'dsh-git-sidebar'

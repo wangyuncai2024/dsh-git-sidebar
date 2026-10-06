@@ -1,0 +1,32 @@
+# dsh-git-sidebar —— 换机器 / 换 DSH 版本的第一道回归
+#
+# 与 dsh-git-panel 的 CI 同一套理由：README 里反复强调「换机器、换 DSH 版本时先跑
+# 一次 npm test」，它覆盖插件自身的加载与注册契约 —— 其中**最关键的一条**是
+# 「右侧栏标签类型的三段式注册」：一旦宿主的 sidebarRightTabs 契约变了，
+# 表现通常是「插件装上了、但右侧栏里没有 Git 这一项」，静默且难查。
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # engines 声明的是 ^22.19.0 || >=24.0.0，两个都跑。
+        node: ['22.19.0', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 零依赖插件：没有 npm install 这一步（dependencies 为空）。
+      - name: 语法检查
+        run: npm run check
+
+      - name: 测试
+        run: npm test

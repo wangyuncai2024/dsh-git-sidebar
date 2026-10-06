@@ -1,0 +1,45 @@
+{
+  "name": "dsh-git-sidebar",
+  "version": "0.1.0",
+  "description": "DSH Git 侧边栏插件：把 Git 面板作为右侧栏（rightbar）的一等标签接入，与「工作区文件」「新建终端」「浏览器」并列。本插件是 dsh-git-panel（右下角悬浮面板）的侧边栏版：宿主侧的 git 执行、操作注册表、失败分类与中文补救、镜像/代理加速、统一日志都从 dsh-git-panel 复用同一套实现，客户端半边则从「浮层」改写为「右侧栏标签」——由宿主右侧栏的标签系统承载，随会话共存、可 docked 可 floating，不再有独立浮窗、不再需要自己管位置与尺寸。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "git",
+    "sidebar",
+    "panel",
+    "cordis"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "check": "node --check lib/index.js && node --check lib/client.js && node --check lib/routes.js && node --check lib/ops.js && node --check lib/tools.js && node --check lib/git.js && node --check lib/net.js && node --check lib/log.js && node --check lib/help.js && node --check lib/failure.js && node --check lib/util.js",
+    "test": "node --test"
+  },
+  "dependencies": {},
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "license": "MIT"
+}
