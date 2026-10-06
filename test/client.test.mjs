@@ -892,6 +892,34 @@ function findButton(tree, label) {
   return flattenTree(tree).find((node) => node.type === 'button' && textOf(node) === label)
 }
 
+/**
+ * 展开分支管理区块（新版式下它默认收起，区块头是可点的 role=button）。
+ * 返回展开后的树。前置条件：当前是仓库且树已 settle。
+ */
+async function openBranchManager(tree, react) {
+  const head = flattenTree(tree).find((node) =>
+    node !== null && typeof node === 'object' && node.props !== undefined
+    && node.props.className === 'dgs-fold-head'
+    && typeof textOf(node) === 'string' && textOf(node).startsWith('本地分支'))
+  assert.ok(head !== undefined, '应有「本地分支」折叠区块头')
+  await head.props.onClick()
+  return react.settle()
+}
+
+/**
+ * 展开远程配置区块（默认收起；展开状态由 showRemotes 控制）。
+ * 返回展开后的树。注意：正在编辑/出错/有重复远程时会强制展开，此时也安全。
+ */
+async function openRemotesSection(tree, react) {
+  const head = flattenTree(tree).find((node) =>
+    node !== null && typeof node === 'object' && node.props !== undefined
+    && node.props.className === 'dgs-fold-head'
+    && typeof textOf(node) === 'string' && textOf(node).startsWith('远程仓库'))
+  assert.ok(head !== undefined, '应有「远程仓库」折叠区块头')
+  await head.props.onClick()
+  return react.settle()
+}
+
 /** 按包裹它的 label 文本找一个勾选框（面板里有 amend / 变基 / 浅克隆几个）。 */
 function findCheckbox(tree, labelText) {
   const label = flattenTree(tree).find((node) =>
@@ -1744,10 +1772,7 @@ test('client standalone：分支管理器列出远端分支，点「拿成新分
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
 
-  const manage = findButton(initial, '管理')
-  assert.ok(manage !== undefined, '应渲染出「管理」按钮')
-  await manage.props.onClick()
-  const opened = await react.settle()
+  const opened = await openBranchManager(initial, react)
 
   const opCalls = () => harness.calls.fetch
     .filter((call) => String(call.url).includes('/git-sidebar/op'))
@@ -1845,8 +1870,7 @@ test('client standalone：默认分支有独立「默认」徽章、全名进 to
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
-  await findButton(initial, '管理').props.onClick()
-  const opened = await react.settle()
+  const opened = await openBranchManager(initial, react)
 
   const texts = flattenTree(opened).map(textOf)
   // 分组顶部提示行：即使本地没有 origin/HEAD（defaultRef 为 null），宿主的
@@ -1941,6 +1965,215 @@ test('client standalone：改动被截断时必须说明「还有 N 处未显示
   // 面板画 40 条，宿主回了 100 条、真实总数 137：差多少必须写出来。
   assert.ok(text.includes('还有 97 处未显示'), `截断要说出来，实际：${text.slice(0, 400)}`)
   assert.ok(text.includes('137 处改动'), '摘要胶囊要用宿主的真实总数，不是列表长度')
+})
+
+// ── 8b. 融合升级：目录树 / 冲突横幅 / 标签角标 / stash 藏起 / 提交历史徽章 ────
+
+test('client standalone：嵌套改动折成目录树（单子目录链压缩、目录行带计数与「暂存目录」）', async () => {
+  const repoState = {
+    ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: null,
+    ahead: 0, behind: 0,
+    changes: [
+      { code: ' M', path: 'src/client/changes/a.ts', staged: false },
+      { code: ' M', path: 'src/client/changes/b.ts', staged: false },
+      { code: ' M', path: 'README.md', staged: false },
+    ],
+    changesTotal: 3, log: [], remotes: [],
+  }
+  const harness = makeFakeWindow({ stateResponse: repoState })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const tree = await react.settle()
+  const text = textOf(tree)
+  // 单子目录链压缩：src/client/changes 三段并成一个目录行，不再出现中间层单独占行。
+  assert.ok(text.includes('src/client/changes'), `单子目录链要压成一行：${text.slice(0, 500)}`)
+  // 目录行带下级变更数胶囊与目录级暂存按钮。
+  assert.ok(text.includes('暂存目录'), '目录行要有「暂存目录」按钮（git add -A -- <dir>）')
+  const stagedir = flattenTree(tree).find((node) => textOf(node) === '暂存目录')
+  assert.ok(stagedir !== undefined, '应找到暂存目录按钮')
+  // 目录行的按钮会 stopPropagation（防止顺手把目录折叠）；假调用要给个像样的事件。
+  await stagedir.props.onClick({ stopPropagation() {} })
+  const calls = harness.calls.fetch
+    .filter((call) => String(call.url).includes('/git-sidebar/op'))
+    .map((call) => JSON.parse(call.init.body))
+  const addDir = calls.find((payload) => payload.op === 'addDir')
+  assert.ok(addDir !== undefined, '点「暂存目录」应 POST op=addDir')
+  assert.equal(addDir.path, 'src/client/changes', 'path 是目录路径（pathspec）')
+})
+
+test('client standalone：目录行可折叠（点一下收起子树，再点展开）', async () => {
+  const repoState = {
+    ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: null,
+    ahead: 0, behind: 0,
+    changes: [
+      { code: ' M', path: 'src/a.ts', staged: false },
+      { code: ' M', path: 'src/b.ts', staged: false },
+    ],
+    changesTotal: 2, log: [], remotes: [],
+  }
+  const harness = makeFakeWindow({ stateResponse: repoState })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const initial = await react.settle()
+  const dirRow = flattenTree(initial).find((node) =>
+    typeof node.props.title === 'string' && node.props.title.includes('src（'))
+  assert.ok(dirRow !== undefined, '应有 src 的目录行')
+  await dirRow.props.onClick()
+  const collapsed = await react.settle()
+  assert.ok(!textOf(collapsed).includes('a.ts'), '收起后子树里的文件行不应再渲染')
+  await dirRow.props.onClick()
+  const expanded = await react.settle()
+  assert.ok(textOf(expanded).includes('a.ts'), '再点一下应重新展开')
+})
+
+test('client standalone：UU 冲突条目带「冲突」徽章，且顶部有中文指引横幅', async () => {
+  const repoState = {
+    ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: null,
+    ahead: 0, behind: 0,
+    changes: [
+      { code: 'UU', path: 'conflict.txt', staged: false },
+      { code: ' M', path: 'a.txt', staged: false },
+    ],
+    changesTotal: 2,
+    conflicts: ['conflict.txt'],
+    log: [], remotes: [],
+  }
+  const harness = makeFakeWindow({ stateResponse: repoState })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const tree = await react.settle()
+  const text = textOf(tree)
+  assert.ok(text.includes('撞上了冲突'), '应有冲突横幅')
+  assert.ok(text.includes('conflict.txt'), '横幅要列出冲突文件')
+  // 冲突行的说明在 tooltip 上（title 属性）：定位那一行并检查它。
+  const conflictRow = flattenTree(tree).find((node) =>
+    typeof node.props.title === 'string' && node.props.title.includes('合并冲突'))
+  assert.ok(conflictRow !== undefined, '冲突行要有「合并冲突」说明（tooltip）')
+  assert.ok(conflictRow.props.title.includes('改好内容再「暂存」'), 'tooltip 要给下一步')
+})
+
+test('client standalone：「藏起当前改动」按钮把 stashPush 交给宿主并展开备份区', async () => {
+  const repoState = {
+    ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: null,
+    ahead: 0, behind: 0,
+    changes: [{ code: ' M', path: 'a.txt', staged: false }],
+    changesTotal: 1, log: [], remotes: [],
+  }
+  const harness = makeFakeWindow({
+    stateResponse: repoState,
+    opResponses: { stashPush: { ok: true, state: repoState }, stashList: { ok: true, stash: [], state: null } },
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const tree = await react.settle()
+  const button = flattenTree(tree).find((node) => textOf(node) === '藏起当前改动')
+  assert.ok(button !== undefined, '应有「藏起当前改动」按钮')
+  await button.props.onClick()
+  const calls = harness.calls.fetch
+    .filter((call) => String(call.url).includes('/git-sidebar/op'))
+    .map((call) => JSON.parse(call.init.body))
+  assert.ok(calls.some((payload) => payload.op === 'stashPush'), '应 POST op=stashPush')
+  assert.ok(calls.some((payload) => payload.op === 'stashList'), '成功后要拉一次 stash 备份列表')
+})
+
+test('client standalone：有改动时标签标题显示「Git · N」徽章', async () => {
+  const repoState = {
+    ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: null,
+    ahead: 0, behind: 0,
+    changes: [{ code: ' M', path: 'a.txt', staged: false }],
+    changesTotal: 3, log: [], remotes: [],
+  }
+  const harness = makeFakeWindow({ stateResponse: repoState })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  const { slots, registered } = makeSlots()
+  exports.apply({ slots })
+  const panel = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab').component
+  const title = registered.find((entry) => entry.options.name === 'sidebar.right.pane.tab.title').component
+  react.mount(panel, { useSessions: (selector) => selector(sessionStore({ s1: { cwd: '/tmp/demo' } })) })
+  await react.settle()
+  // 面板拿到状态后，标签标题（宿主投影时渲染）读到的应是同一个徽章 store。
+  const titleText = textOf(title({}))
+  assert.ok(titleText.includes('Git · 3'), `有 3 处改动时标题应是「Git · 3」，实际：${titleText}`)
+})
+
+test('client standalone：提交历史显示 refs 徽章与作者/相对时间，满页时出现「加载更多」', async () => {
+  const repoState = {
+    ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: null,
+    ahead: 0, behind: 0,
+    changes: [], changesTotal: 0,
+    log: [
+      { hash: 'a1b2c3d', subject: 'fix: 修好它', refs: 'HEAD -> main', author: '张三', date: '2026-01-01 10:00:00 +0800' },
+      { hash: 'e4f5g6h', subject: 'feat: 新功能', refs: 'tag: v1, origin/main', author: '李四', date: '2025-12-31 09:00:00 +0800' },
+      ...Array.from({ length: 6 }, (_, index) => ({ hash: 'h' + index, subject: 'c' + index, refs: '', author: '', date: '' })),
+    ],
+    remotes: [],
+  }
+  const harness = makeFakeWindow({
+    stateResponse: repoState,
+    opResponses: { logPage: { ok: true, logPage: { entries: [], count: 0 }, state: null, notes: ['没有更早的提交了（历史已经到底）'] } },
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const tree = await react.settle()
+  const text = textOf(tree)
+  assert.ok(text.includes('main'), 'refs 徽章要显示分支名（HEAD -> main 取箭头后）')
+  assert.ok(text.includes('v1'), 'tag 装饰也要显示')
+  assert.ok(text.includes('张三'), '作者要显示')
+  const more = flattenTree(tree).find((node) =>
+    typeof node.props.title === 'string' && node.props.title.includes('加载更多'))
+  assert.ok(more !== undefined, '满 8 条（一页首屏）时应出现「加载更多」')
+  await more.props.onClick()
+  const calls = harness.calls.fetch
+    .filter((call) => String(call.url).includes('/git-sidebar/op'))
+    .map((call) => JSON.parse(call.init.body))
+  const page = calls.find((payload) => payload.op === 'logPage')
+  assert.ok(page !== undefined, '点「加载更多」应 POST op=logPage')
+  assert.equal(page.skip, 8, 'skip = 已加载条数')
+})
+
+test('client standalone：diff 升级 —— 配对的删/增渲染成「改」行，长上下文折叠可展开', async () => {
+  const diffText = [
+    'diff --git a/a.txt b/a.txt',
+    '@@ -1,12 +1,12 @@',
+    ...Array.from({ length: 10 }, (_, index) => ' ctx' + index),
+    '-旧名字',
+    '+新名字',
+    ...Array.from({ length: 10 }, (_, index) => ' tail' + index),
+  ].join('\n')
+  const repoState = {
+    ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: null,
+    ahead: 0, behind: 0,
+    changes: [{ code: ' M', path: 'a.txt', staged: false }],
+    changesTotal: 1, log: [], remotes: [],
+  }
+  const harness = makeFakeWindow({
+    stateResponse: repoState,
+    opResponse: { ok: true, diff: diffText, state: repoState },
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const initial = await react.settle()
+  const clickable = flattenTree(initial).find((node) =>
+    typeof node.props.title === 'string' && node.props.title.includes('点击查看 diff'))
+  await clickable.props.onClick()
+  const opened = await react.settle()
+  const text = textOf(opened)
+  assert.ok(text.includes('-旧名字'), '删侧行原样保留（文本一字不改）')
+  assert.ok(text.includes('+新名字'), '加侧行原样保留')
+  assert.ok(text.includes('行未改动'), '≥8 行的连续上下文要折叠')
+  const fold = flattenTree(opened).find((node) =>
+    typeof node.props.className === 'string' && node.props.className.includes('dgs-diff-fold'))
+  assert.ok(fold !== undefined, '折叠块是可点元素')
+  await fold.props.onClick()
+  const expandedText = textOf(await react.settle())
+  assert.ok(expandedText.includes('ctx0'), '点折叠块应展开出被折的上下文行')
 })
 
 test('client standalone：数据型操作带 noState，state:null 也不会抹掉面板状态', async () => {
@@ -2047,8 +2280,7 @@ test('client standalone：数组子节点必须都带 key（真实 React 会警�
   await findButton(tree, '🌐').props.onClick()
   tree = await react.settle()
   assertKeys(tree)
-  await findButton(tree, '管理').props.onClick()
-  tree = await react.settle()
+  tree = await openBranchManager(tree, react)
   assertKeys(tree)
   await findButton(tree, '拉取').props.onClick()
   tree = await react.settle()
@@ -2092,13 +2324,13 @@ test('client standalone：换工作区会收起分支管理器并清掉远程编
   mountPanel(exports, react, store)
 
   let tree = await react.settle()
-  await findButton(tree, '管理').props.onClick()
-  tree = await react.settle()
+  tree = await openBranchManager(tree, react)
   assert.ok(textOf(tree).includes('本地分支'), '前置条件：分支管理器已展开')
 
-  // A 没有远程 → 卡片上是「+ 添加远程」；展开后填一个**没保存**的地址。
-  // （旧版这里是一个「配置」按钮 + 单一草稿；现在每个远程各自一个编辑器，
-  //   新增走 '+ 添加远程'，所以断言跟着换，验证的意图不变：草稿不能跨仓库带走。）
+  // A 没有远程 → 远程区块展开后是「+ 添加远程」；点开后填一个**没保存**的地址。
+  // （新版式下远程区块默认收起；「添加远程」表单在区块内部，
+  //   所以先展开区块再点「+ 添加远程」。验证意图不变：草稿不能跨仓库带走。）
+  tree = await openRemotesSection(tree, react)
   await findButton(tree, '+ 添加远程').props.onClick()
   tree = await react.settle()
   // 输入框的「内容」在 props.value 里（textOf 只看子节点，DOM 里的 input 也一样）。
@@ -2113,7 +2345,9 @@ test('client standalone：换工作区会收起分支管理器并清掉远程编
   // 换工作区：属于旧仓库的东西必须清掉 —— 这正是 reducer 的 'reset-repo' 在管的事。
   store.byId.s1.cwd = '/tmp/ws-b'
   tree = await react.settle()
-  assert.equal(textOf(tree).includes('本地分支'), false, '分支管理器属于旧仓库，切走后要收起')
+  // 折叠头本身永远显示「本地分支」字样，展开与否要看展开态才有的内容
+  // （新建分支输入框 / 「设置上游」等）。
+  assert.equal(textOf(tree).includes('新分支名（新建并切换）'), false, '分支管理器属于旧仓库，切走后要收起')
   const after = remoteInput(tree)
   assert.equal(
     after !== undefined && String(after.props.value).includes('not-saved'),
@@ -2136,7 +2370,9 @@ test('client standalone：有 pageUrl 时远程行出现「仓库页 ↗」外�
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  const initial = await react.settle()
+  // 远程区块默认收起，先展开再找那一行的外链。
+  const tree = await openRemotesSection(initial, react)
 
   const link = flattenTree(tree).find((node) =>
     node !== null && typeof node === 'object' && node.type === 'a' && node.props.href === 'https://github.com/user/demo')
@@ -2398,9 +2634,7 @@ test('client standalone：脏工作区点分支名 → 确认后用「安全切�
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
 
-  const manage = findButton(initial, '管理')
-  await manage.props.onClick()
-  const opened = await react.settle()
+  const opened = await openBranchManager(initial, react)
 
   const devName = flattenTree(opened).find((node) =>
     node !== null && typeof node === 'object' && node.type === 'span'
@@ -2625,8 +2859,7 @@ test('client standalone：分支管理开着时状态一变就重列分支（外
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
 
-  await findButton(initial, '管理').props.onClick()
-  let tree = await react.settle()
+  let tree = await openBranchManager(initial, react)
   const branchCalls = () => harness.calls.fetch
     .filter((call) => String(call.url).includes('/git-sidebar/op'))
     .map((call) => JSON.parse(call.init.body))
@@ -2882,10 +3115,7 @@ test('client standalone：窄栏下分支名与「⋯」是两段可换行的行
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
-  const manage = findButton(initial, '管理')
-  assert.ok(manage !== undefined, '应渲染出「管理」按钮')
-  await manage.props.onClick()
-  const opened = await react.settle()
+  const opened = await openBranchManager(initial, react)
 
   // 分支行：带 dgs-track 类的那几行（改动清单的行也带 dgs-rowitem，
   // 但只有分支行有跟踪标签，用它把两类行区分开）。
@@ -2911,21 +3141,23 @@ test('client standalone：窄栏下分支名与「⋯」是两段可换行的行
   )
 })
 
-test('client standalone：「分支」那一行也是可换行的（窄栏下按钮掉到第二行）', async () => {
+test('client standalone：头部的分支行可换行，分支名有最小宽度（窄栏下不被压没）', async () => {
   const harness = makeFakeWindow({ stateResponse: REPO_WITH_CHANGES })
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const tree = await react.settle()
-  // 这一行是「分支 <名字> → <上游> …… 领先/落后 [管理]」。
-  const row = flattenTree(tree).find((node) =>
+  // 新版式：分支上下文住在头部（dgs-head），那一行是「<分支名> → <上游> 领先/落后」。
+  const head = findByClass(tree, 'dgs-head')
+  assert.ok(head !== undefined, '头部上下文条要在')
+  const row = flattenTree(head).find((node) =>
     node !== null && typeof node === 'object' && node.props !== undefined
     && Array.isArray(node.children)
     && typeof textOf(node) === 'string'
-    && textOf(node).startsWith('分支')
+    && textOf(node).includes(REPO_WITH_CHANGES.branch)
     && node.props.style !== undefined
     && node.props.style.flexWrap === 'wrap')
-  assert.ok(row !== undefined, '「分支」行必须允许换行（否则 300px 下分支名被压成 for...）')
+  assert.ok(row !== undefined, '头部的分支行必须允许换行（否则 300px 下分支名被压没）')
   // 名字那一项要有最小宽度，不能缩成几个字符。
   const nameSpan = flattenTree(row).find((node) =>
     node !== null && typeof node === 'object' && node.type === 'span'
@@ -2935,6 +3167,8 @@ test('client standalone：「分支」那一行也是可换行的（窄栏下按
     typeof nameSpan.props.style.minWidth === 'string' && nameSpan.props.style.minWidth.endsWith('em'),
     '分支名要给一个最小宽度（4em 档），否则会被压到只剩省略号：' + nameSpan.props.style.minWidth,
   )
+  // 头部不再有旧浮窗的大标题（右侧栏标签栏已经写着 Git，正文里不再重复）。
+  assert.equal(textOf(head).includes('🐙'), false, '头部不该再有 🐙 大标题')
 })
 
 test('client standalone：面板仍是「铺满框」而不是浮窗（回归：别把 fixed 加回来）', async () => {
@@ -3019,8 +3253,7 @@ test('client standalone：新建分支名撞上远端名时就地拦下，不发
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
-  await findButton(initial, '管理').props.onClick()
-  let tree = await react.settle()
+  let tree = await openBranchManager(initial, react)
 
   const createdOps = () => harness.calls.fetch
     .filter((call) => String(call.url).includes('/git-sidebar/op'))
@@ -3117,7 +3350,8 @@ test('client standalone：多个远程全部列出（不再只显示第一个）
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  const initial = await react.settle()
+  const tree = await openRemotesSection(initial, react)
 
   const rows = flattenTree(tree).filter((node) =>
     node !== null && typeof node === 'object' && node.type === 'div'
@@ -3135,7 +3369,8 @@ test('client standalone：点某个远程的「改」，编辑器播种的是那
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  const initial = await react.settle()
+  const tree = await openRemotesSection(initial, react)
 
   // 找到 fork 那一行的「改」按钮（按行内定位，不按全局第一个按钮 —— 那正是旧 bug 的成因）。
   const forkRow = flattenTree(tree).find((node) =>
@@ -3181,7 +3416,8 @@ test('client standalone：「+ 添加远程」打开的是新增表单（名字�
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  const initial = await react.settle()
+  const tree = await openRemotesSection(initial, react)
 
   const add = findButton(tree, '+ 添加远程')
   assert.ok(add !== undefined, '应有「+ 添加远程」入口')
@@ -3234,8 +3470,7 @@ test('client standalone：本地分支行标出跟踪关系（→ origin/main / 
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
-  await findButton(initial, '管理').props.onClick()
-  const opened = await react.settle()
+  const opened = await openBranchManager(initial, react)
 
   const tags = flattenTree(opened).filter((node) =>
     node !== null && typeof node === 'object' && node.type === 'span'
@@ -3307,7 +3542,8 @@ test('client standalone：远程行的「推送到此」直接把那个远程交
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  const initial = await react.settle()
+  const tree = await openRemotesSection(initial, react)
   assert.equal(findPushTargetSelect(tree).props.value, '', '前置条件：还没选过，默认跟随上游')
 
   const button = findPushToRemoteButton(tree, 'fork')
@@ -3756,7 +3992,8 @@ test('client standalone：远程行的「拉 master」一键从此外拉，并�
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  const initial = await react.settle()
+  const tree = await openRemotesSection(initial, react)
   assert.equal(findPullTargetSelect(tree).props.value, '', '前置条件：还没选过，默认跟随上游')
 
   // origin 那一行的按钮被点名成「拉 master」（与「推送到此」对称的那个入口）。
@@ -3789,7 +4026,8 @@ test('client standalone：远程默认分支与当前分支同名时，远程行
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  const initial = await react.settle()
+  const tree = await openRemotesSection(initial, react)
 
   const button = findPullFromRemoteButton(tree, 'origin')
   assert.equal(textOf(button), '从此外拉', '同名时按钮不点名分支')
@@ -3811,7 +4049,8 @@ test('client standalone：宿主没有 remoteHeads（旧宿主）时退回老行
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  const initial = await react.settle()
+  const tree = await openRemotesSection(initial, react)
 
   const options = (findPullTargetSelect(tree).children ?? []).filter((child) =>
     child !== null && typeof child === 'object' && child.type === 'option')
@@ -3954,7 +4193,9 @@ test('client standalone：真实现场（两个远程的默认分支都叫 maste
   })
   const realReact = makeStatefulReact()
   mountPanel(evaluateBundle(realHarness, realReact.api).exports, realReact, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const real = await realReact.settle()
+  const realInitial = await realReact.settle()
+  // 「拉取自」下拉在同步区（不在折叠区块里），但远程行的按钮在收起的远程区块里。
+  const real = await openRemotesSection(realInitial, realReact)
 
   const options = (findPullTargetSelect(real).children ?? []).filter((child) =>
     child !== null && typeof child === 'object' && child.type === 'option')
@@ -3998,7 +4239,8 @@ test('client standalone：当前分支正好就是远端默认分支的名字时
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  const initial = await react.settle()
+  const tree = await openRemotesSection(initial, react)
 
   const options = (findPullTargetSelect(tree).children ?? []).filter((child) =>
     child !== null && typeof child === 'object' && child.type === 'option')
@@ -4031,8 +4273,7 @@ test('client standalone：多远程时远端分支按远程分组并写短名，
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
-  await findButton(initial, '管理').props.onClick()
-  const opened = await react.settle()
+  const opened = await openBranchManager(initial, react)
 
   const groups = flattenTree(opened).filter((node) =>
     node !== null && typeof node === 'object' && node.type === 'div'
@@ -4139,8 +4380,7 @@ test('client standalone：远端分支已有本地分支跟踪时给「切过去
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
-  await findButton(initial, '管理').props.onClick()
-  const opened = await react.settle()
+  const opened = await openBranchManager(initial, react)
 
   // ① 当前分支跟踪的那一条：标出行内「当前跟踪」+ 禁用的「当前分支」——
   //    「你已经有了、而且就在上面」由这两个标记说清（再写一句 `↩ 本地 …` 反而是重复，
@@ -4219,8 +4459,7 @@ test('client standalone：「设置上游」把本地分支绑到选中的远端
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
-  await findButton(initial, '管理').props.onClick()
-  const opened = await react.settle()
+  const opened = await openBranchManager(initial, react)
 
   // 本地行：动作都收在「⋯」里（危险动作不再常驻）。改上游就在这里。
   // 定位靠它那一句跟踪标签（本地行的名字 tooltip 是「当前分支：…」，与远端行不同）。
@@ -4327,8 +4566,7 @@ async function openBranchMoreMenu(options = {}) {
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
-  await findButton(initial, '管理').props.onClick()
-  const opened = await react.settle()
+  const opened = await openBranchManager(initial, react)
   const localRow = flattenTree(opened).find((node) =>
     node !== null && typeof node === 'object' && node.type === 'div'
     && typeof node.props.className === 'string'

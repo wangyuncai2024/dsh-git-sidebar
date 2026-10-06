@@ -30,6 +30,10 @@ import {
   isSafePushTarget,
   parseCompareOutput,
   parseStashList,
+  parseStatusZ,
+  isConflictCode,
+  argvLogPage,
+  parseLogPage,
   pickRemoteDefaultBranch,
   buildOpArgv,
   unrelatedChoices,
@@ -258,6 +262,90 @@ test('checkoutHint：脏工作区要指向「安全切分支」，分支不存�
   assert.match(dirty, /安全切分支/, '要把面板上真正能救场的那条路说出来')
   assert.match(checkoutHint('branch-missing'), /新建/)
   assert.equal(checkoutHint('none'), null)
+})
+
+// ── parseStatusZ：`status --porcelain=v1 -z`（CJK / 空格 / 换行路径） ─────────
+
+test('parseStatusZ：NUL 分帧切出每个条目，`## ` 分支行跳过（它不是改动）', () => {
+  const rows = parseStatusZ('## master...origin/main [ahead 1]\0 M a.txt\0?? b.txt\0')
+  assert.deepEqual(rows, [
+    { code: ' M', path: 'a.txt', staged: false },
+    { code: '??', path: 'b.txt', staged: false },
+  ])
+})
+
+test('parseStatusZ：中文与空格路径原样保留（core.quotePath=false 关掉 C-quote）', () => {
+  const rows = parseStatusZ('M  docs/文档 新.md\0')
+  assert.deepEqual(rows, [{ code: 'M ', path: 'docs/文档 新.md', staged: true }])
+})
+
+test('parseStatusZ：重命名（R）条目消费掉第二个 token（原始路径），不误当条目', () => {
+  const rows = parseStatusZ('R  new.txt\0old.txt\0 M x.txt\0')
+  assert.deepEqual(rows, [
+    { code: 'R ', path: 'new.txt', staged: true },
+    { code: ' M', path: 'x.txt', staged: false },
+  ])
+})
+
+test('parseStatusZ：空输出 / null → 空数组（调用方不用判空）', () => {
+  assert.deepEqual(parseStatusZ(''), [])
+  assert.deepEqual(parseStatusZ(null), [])
+})
+
+// ── isConflictCode：UU/AA/DD 与一切带 U 的组合都是冲突现场 ──────────────────
+
+test('isConflictCode：双方动作（UU/AA/DD）与一侧未合并（UD/DU/AU/UA）都算冲突', () => {
+  for (const code of ['UU', 'AA', 'DD', 'AU', 'UA', 'DU', 'UD']) {
+    assert.equal(isConflictCode(code), true, code + ' 应识别为冲突')
+  }
+  for (const code of [' M', 'M ', '??', 'A ', 'D ', 'MM', 'AM', 'R ']) {
+    assert.equal(isConflictCode(code), false, code + ' 不该被当成冲突')
+  }
+})
+
+// ── argvLogPage / parseLogPage：提交历史的结构化分页 ─────────────────────────
+
+test('argvLogPage：默认 20 条、count 夹紧、skip 交给 git；%x1f 分字段格式', async () => {
+  const argv = await buildOpArgv('logPage', {})
+  assert.ok(argv.includes('--pretty=format:%h%x1f%s%x1f%an%x1f%ai%x1f%D'), '字段分隔必须是 unit separator')
+  assert.deepEqual(await buildOpArgv('logPage', { count: 5, skip: 20 }),
+    ['log', '--no-color', '--decorate=short',
+      '--pretty=format:%h%x1f%s%x1f%an%x1f%ai%x1f%D', '-n', '5', '--skip', '20'])
+  // 上限保护：count 最大 50（防一次拉爆），skip 上限 1 万（乱传大数白跑）。
+  const capped = await buildOpArgv('logPage', { count: 9999, skip: 99999 })
+  assert.ok(capped.includes('50'), 'count 要夹到 50')
+  assert.ok(capped.includes('10000'), 'skip 要夹到 10000')
+})
+
+test('parseLogPage：unit separator 切 hash/标题/作者/日期/refs，坏行跳过', () => {
+  const page = parseLogPage(
+    'a1b2c3d\x1ffix: 修好它\x1f张三\x1f2026-01-01 10:00:00 +0800\x1fHEAD -> main\n'
+    + 'e4f5g6h\x1ffeat: 新功能\x1f李四\x1f2025-12-31 09:00:00 +0800\x1ftag: v1, origin/main\n',
+  )
+  assert.equal(page.count, 2)
+  assert.equal(page.entries[0].hash, 'a1b2c3d')
+  assert.equal(page.entries[0].subject, 'fix: 修好它')
+  assert.equal(page.entries[0].author, '张三')
+  assert.equal(page.entries[1].refs, 'tag: v1, origin/main')
+  // 提交标题里可以有竖线、括号 —— 只有 \x1f 是分隔符。
+  const tricky = parseLogPage('h1\x1f(a || b) -> 修 | 好了\x1fx\x1f2026-01-01\x1f')
+  assert.equal(tricky.entries[0].subject, '(a || b) -> 修 | 好了')
+  assert.deepEqual(parseLogPage(''), { entries: [], count: 0 })
+})
+
+test('buildOpArgv：stashPush 带 -u 与中文说明，说明可省（缺省写「手动藏起」）', async () => {
+  assert.deepEqual(
+    await buildOpArgv('stashPush', { message: '试一下 rebase' }),
+    ['stash', 'push', '-u', '-m', '试一下 rebase'],
+  )
+  const fallback = await buildOpArgv('stashPush', {})
+  assert.deepEqual(fallback, ['stash', 'push', '-u', '-m', 'dsh-git-sidebar：手动藏起（面板）'])
+  assert.match(OPS.stashPush.note(), /stash 备份/, '成功说明要指向「stash 备份」找回')
+})
+
+test('buildOpArgv：目录级暂存 addDir 走 all=true + `--` pathspec', async () => {
+  assert.deepEqual(await buildOpArgv('addDir', { path: 'src/client' }), ['add', '-A', '--', 'src/client'])
+  await assert.rejects(() => buildOpArgv('addDir', {}), /目录路径|路径/)
 })
 
 // ── parseStashList：git stash list（面板「stash 备份」） ────────────────────
@@ -618,7 +706,9 @@ test('buildOpArgv：单文件暂存 / 取消暂存 / 还原都带 `--` 分隔符
 
 test('buildOpArgv：提交详情带 --stat 与完整作者信息，并走本地超时档', async () => {
   const argv = await buildOpArgv('show', { ref: 'abc1234' })
-  assert.deepEqual(argv, ['show', '--no-color', '--stat', '--format=fuller', 'abc1234'])
+  // --end-of-options 哨兵：ref 是调用方回传的提交号，哨兵让它永远不可能被解析成选项
+  //（`rev: "--output=NUL"` 这类 flag 注入在哨兵处停下，失败而不是写文件）。
+  assert.deepEqual(argv, ['show', '--no-color', '--stat', '--format=fuller', '--end-of-options', 'abc1234'])
   assert.equal(opTimeoutMs(OPS.show), GIT_LOCAL_TIMEOUT_MS, '本地命令不该按两分钟预算等')
   await assert.rejects(() => buildOpArgv('show', {}), /提交号/)
 })

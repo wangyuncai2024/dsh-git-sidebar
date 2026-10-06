@@ -1,6 +1,6 @@
 {
   "name": "dsh-git-sidebar",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DSH Git 侧边栏插件：把 Git 面板作为右侧栏（rightbar）的一等标签接入，与「工作区文件」「新建终端」「浏览器」并列。本插件是 dsh-git-panel（右下角悬浮面板）的侧边栏版：宿主侧的 git 执行、操作注册表、失败分类与中文补救、镜像/代理加速、统一日志都从 dsh-git-panel 复用同一套实现，客户端半边则从「浮层」改写为「右侧栏标签」——由宿主右侧栏的标签系统承载，随会话共存、可 docked 可 floating，不再有独立浮窗、不再需要自己管位置与尺寸。",
   "keywords": [
     "dsh",

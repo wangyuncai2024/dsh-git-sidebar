@@ -864,7 +864,8 @@ test('standalone：stashSwitch —— commit 模式（干净工作区）就是�
     const target = first.stdout.trim().slice(0, 7)
     const payload = await stashSwitch({ commit: target }, work)
     assert.equal(payload.ok, true, '干净工作区应该直接切成功：' + JSON.stringify(payload))
-    assert.equal(payload.command, 'git switch --detach ' + target, '命令要如实回显')
+    // --end-of-options 哨兵是提交号模式的一部分：它让提交号永远不可能被解析成选项。
+    assert.equal(payload.command, 'git switch --detach --end-of-options ' + target, '命令要如实回显')
     const head = await runGit(['rev-parse', '--short', 'HEAD'], work, { timeoutMs: 20000 })
     assert.equal(head.stdout.trim(), target)
     const stash = await runGit(['stash', 'list'], work, { timeoutMs: 20000 })
