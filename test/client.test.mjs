@@ -823,7 +823,7 @@ test('client standalone：runOp 失败时调用方拿到 ok:false（而不是 un
 // 修法：diff 内联在被点的那一行下面，与文件行共用清单这一个滚动区；清单本身
 // flex:0 0 auto（自带滚动，永不被压），展开期间把清单取景框放高。
 
-test('client standalone：展开的 diff 内联在改动清单里，不挤掉也不盖住清单', async () => {
+test('client standalone：点改动行会把 diff 升成一等表面（左列表｜右 diff），不再是清单里的一层', async () => {
   const repoState = {
     ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: 'origin/main',
     ahead: 0, behind: 0,
@@ -846,9 +846,18 @@ test('client standalone：展开的 diff 内联在改动清单里，不挤掉也
   const initial = await react.settle()
   const list = flattenTree(initial).find((node) => node.props.key === 'changes')
   assert.ok(list !== undefined, '应渲染出改动清单容器')
-  // 这一条钉的是根因：清单自带滚动，绝不能被 flex 压缩（否则就是「被盖住」）。
+  // 这一条钉的是根因：清单绝不能被 flex 压缩（否则就是「被盖住」）。
   assert.equal(list.props.style.flex, '0 0 auto', '改动清单不能被 flex 压扁')
-  assert.equal(list.props.style.maxHeight, '148px', '没展开 diff 时清单保持紧凑高度')
+  // **清单不再自带滚动条与高度上限**（旧版是 148px / 展开 diff 时 360px）：
+  // 那一套让同一块框里出现三层嵌套滚动（正文 / 清单 / diff）。
+  // 现在每个表面只有一个滚动区（见 S.surface / S.list 的注释）。
+  assert.equal(list.props.style.maxHeight, undefined, '清单不该再有高度上限')
+  assert.equal(list.props.style.overflowY, undefined, '清单不该再自带滚动条（表面才是唯一滚动区）')
+  // 而且清单里**不该**内联任何 diff（diff 已经是一等表面，见下）。
+  assert.equal(
+    flattenTree(list).filter((node) => node.type === 'pre').length, 0,
+    '改动清单里不该内联 diff 了',
+  )
 
   const clickable = flattenTree(initial).find((node) =>
     typeof node.props.title === 'string' && node.props.title.includes('点击查看 diff'))
@@ -856,22 +865,27 @@ test('client standalone：展开的 diff 内联在改动清单里，不挤掉也
   await clickable.props.onClick()
   const opened = await react.settle()
 
-  const openedList = flattenTree(opened).find((node) => node.props.key === 'changes')
-  assert.ok(openedList !== undefined, '展开后清单容器仍在')
-  const inline = flattenTree(openedList).find((node) =>
+  // **diff 现在是一整块表面**：左列表｜右详情两栏（窄栏下由 CSS 退化成 push 导航）。
+  const split = findByClass(opened, 'dgs-split')
+  assert.ok(split !== undefined, 'diff 应当是 master/detail 两栏结构')
+  const detail = findByClass(opened, 'dgs-split-detail')
+  assert.ok(detail !== undefined, '应有右侧详情栏')
+  // diff 本体在**详情栏里**，不在改动清单的子树里。
+  const inline = flattenTree(detail).find((node) =>
     node.type === 'pre' && textOf(node).includes('+two'))
-  assert.ok(
-    inline !== undefined,
-    '展开的 diff 必须是改动清单的子树：放在清单外面会被正文滚动挤走，表现就是「盖住了清单」',
-  )
-  assert.equal(openedList.props.style.maxHeight, '360px', '展开 diff 时清单取景框要放高，否则 diff 只露一两行')
-  assert.ok(textOf(openedList).includes('b.txt'), '展开一个文件的 diff 不能顶掉其它文件行')
-
-  // 展开中的那一行要有标记，用户才知道下面那块 diff 是谁的。
-  const active = flattenTree(openedList).find((node) =>
+  assert.ok(inline !== undefined, 'diff 内容要渲染在详情栏里')
+  // 左栏列出改动，且当前这一行带高亮（用户要知道下面那块 diff 是谁的）。
+  const leftList = findByClass(opened, 'dgs-split-list')
+  assert.ok(leftList !== undefined, '应有左侧改动列表')
+  assert.ok(textOf(leftList).includes('b.txt'), '左栏要列出其它文件（一眼能换一个看）')
+  const active = flattenTree(leftList).find((node) =>
     typeof node.props.className === 'string' && node.props.className.includes('dgs-rowitem-active'))
-  assert.ok(active !== undefined, '展开中的那一行要高亮')
-  assert.ok(textOf(active).includes('a.txt'), '高亮的应该是被点开的那个文件')
+  assert.ok(active !== undefined, '左栏里当前那一行要高亮')
+
+  // 返回：收起 diff，回到清单。
+  await findButton(opened, '‹ 改动').props.onClick()
+  const back = await react.settle()
+  assert.equal(findByClass(back, 'dgs-split'), undefined, '「‹ 改动」应把 diff 收起')
 })
 
 // ── 5. 回归：切换工作区后，面板上的东西必须跟着切 ───────────────────────────
@@ -967,31 +981,42 @@ function findButton(tree, label) {
 }
 
 /**
- * 展开分支管理区块（新版式下它默认收起，区块头是可点的 role=button）。
- * 返回展开后的树。前置条件：当前是仓库且树已 settle。
+ * 切到一个**表面**（改动 / 历史 / 分支 / 设置）。
+ *
+ * 这一版面板把「一屏只画一件事」做成了四个表面，只有当前那个会渲染 ——
+ * 于是「分支管理」「远程配置」「提交历史」都不再默认出现在树里。所有原先靠
+ * 折叠头 / 🌐 按钮进入的用例，统一改成先切表面（语义没变，只是入口变了）。
  */
-async function openBranchManager(tree, react) {
-  const head = flattenTree(tree).find((node) =>
-    node !== null && typeof node === 'object' && node.props !== undefined
-    && node.props.className === 'dgs-fold-head'
-    && typeof textOf(node) === 'string' && textOf(node).startsWith('本地分支'))
-  assert.ok(head !== undefined, '应有「本地分支」折叠区块头')
-  await head.props.onClick()
+async function openSurface(tree, react, label) {
+  const tab = flattenTree(tree).find((node) =>
+    node !== null && typeof node === 'object' && node.type === 'button'
+    && typeof node.props.className === 'string'
+    && node.props.className.split(' ').includes('dgs-tab')
+    && textOf(node).startsWith(label))
+  assert.ok(tab !== undefined, '应有「' + label + '」表面切换档：' + textOf(tree).slice(0, 220))
+  await tab.props.onClick()
   return react.settle()
 }
 
 /**
- * 展开远程配置区块（默认收起；展开状态由 showRemotes 控制）。
- * 返回展开后的树。注意：正在编辑/出错/有重复远程时会强制展开，此时也安全。
+ * 展开分支管理：进「分支」表面（它进去就是展开的，没有折叠头了）。
+ * 返回展开后的树。前置条件：当前是仓库且树已 settle。
+ */
+async function openBranchManager(tree, react) {
+  return openSurface(tree, react, '分支')
+}
+
+/**
+ * 打开远程配置：进「设置」表面（远程仓库那一块在里面，进去就是展开的）。
+ * 返回展开后的树。
  */
 async function openRemotesSection(tree, react) {
-  const head = flattenTree(tree).find((node) =>
-    node !== null && typeof node === 'object' && node.props !== undefined
-    && node.props.className === 'dgs-fold-head'
-    && typeof textOf(node) === 'string' && textOf(node).startsWith('远程仓库'))
-  assert.ok(head !== undefined, '应有「远程仓库」折叠区块头')
-  await head.props.onClick()
-  return react.settle()
+  return openSurface(tree, react, '设置')
+}
+
+/** 打开「历史」表面（提交列表与提交详情在那里）。 */
+async function openHistory(tree, react) {
+  return openSurface(tree, react, '历史')
 }
 
 /** 按包裹它的 label 文本找一个勾选框（面板里有 amend / 变基 / 浅克隆几个）。 */
@@ -1566,13 +1591,22 @@ test('client standalone：切走之后才回来的操作结果不能盖到新工
 // createElement，任何一处笔误都会让整个 sidebar.right.pane.tab 渲染抛异常 —— 表现是
 // Git 面板直接消失，而不是局部出错。
 
-/** 打开 🌐 网络加速折叠块。 */
+/**
+ * 打开网络加速设置：它现在住在「设置」表面里（不再是头部那个 🌐 按钮）。
+ *
+ * 为什么搬走：旧版面把加速块放在**比「改动」还靠前**的位置，理由是「它解释为什么
+ * 刚才那条命令连不上」。理由成立，但解法错了 —— 该在失败时把它推到用户面前，
+ * 而不是常驻占据第一屏。现在失败提示条里有「去设置」直达入口。
+ */
 async function openNet(react) {
   const before = await react.settle()
-  const globe = findButton(before, '🌐')
-  assert.ok(globe !== undefined, '头部应有 🌐 按钮')
-  assert.equal(typeof globe.props.onClick, 'function')
-  globe.props.onClick()
+  const tabs = flattenTree(before).find((node) =>
+    node !== null && typeof node === 'object' && node.type === 'button'
+    && typeof node.props.className === 'string'
+    && node.props.className.split(' ').includes('dgs-tab')
+    && textOf(node).startsWith('设置'))
+  assert.ok(tabs !== undefined, '应有「设置」表面切换档')
+  tabs.props.onClick()
   return react.settle()
 }
 
@@ -1612,8 +1646,8 @@ test('client standalone：面板挂载时会读一次宿主配置', async () => 
   // 草稿框里应当是打码后的地址：真凭据永远不进浏览器。
   const text = textOf(tree)
   assert.ok(!text.includes('secret'))
-  const globe = findButton(tree, '🌐')
-  const opened = await (async () => { globe.props.onClick(); return react.settle() })()
+  // 网络加速住在「设置」表面里（不再是头部那个 🌐 按钮）。
+  const opened = await openNet(react)
   const proxyInput = flattenTree(opened).find((node) => node.type === 'input' && String(node.props.value).includes('127.0.0.1:7890'))
   assert.ok(proxyInput !== undefined, '代理输入框应预填宿主返回的（已打码）地址')
   assert.ok(String(proxyInput.props.value).includes('***'), '回传的必须是打码串')
@@ -1699,7 +1733,7 @@ test('client standalone：点「检测网络」把各线路结果列出来（含
   assert.ok(text.includes('✗'), '失败的线路要有明确标记')
 })
 
-test('client standalone：宿主判定是网络问题时自动展开加速设置，并把说明回显到结果栏', async () => {
+test('client standalone：宿主判定是网络问题时给出「去设置」入口，并把说明回显到提示条', async () => {
   const repoState = {
     ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: null,
     ahead: 0, behind: 0, changes: [], log: [], remotes: [],
@@ -1710,7 +1744,7 @@ test('client standalone：宿主判定是网络问题时自动展开加速设置
       ok: false, command: 'git fetch --all --prune', exitCode: 128,
       stdout: '', stderr: "fatal: unable to access 'https://github.com/x/y': Recv failure: Connection was reset",
       message: 'Recv failure: Connection was reset',
-      hint: '连不上远端（连接被重置 / 超时），国内直连 github.com 很常见。点面板右上角的 🌐 打开「网络加速」…',
+      hint: '连不上远端（连接被重置 / 超时），国内直连 github.com 很常见。点上面提示条里的「去设置」打开「网络加速」…',
       network: true, accelerated: 'direct', notes: [],
       state: repoState,
     },
@@ -1720,8 +1754,8 @@ test('client standalone：宿主判定是网络问题时自动展开加速设置
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
 
   const initial = await react.settle()
-  // 先确认设置块确实是收起的（不然下面那条断言会因为「本来就开着」而假通过）。
-  assert.equal(findButton(initial, '检测网络'), undefined, '初始状态加速设置应是收起的')
+  // 先确认设置块确实不在（不然下面那条断言会因为「本来就开着」而假通过）。
+  assert.equal(findButton(initial, '检测网络'), undefined, '初始状态加速设置不在视野里')
 
   const fetchBtn = findButton(initial, '获取远程')
   assert.ok(fetchBtn !== undefined, '仓库里应有「获取远程」按钮')
@@ -1729,14 +1763,22 @@ test('client standalone：宿主判定是网络问题时自动展开加速设置
   const after = await react.settle()
   const text = textOf(after)
 
-  // 断言「只有展开时才存在」的控件，而不是「网络加速」这四个字 —— 后者在提示
-  // 文案里也有（「点面板右上角的 🌐 打开「网络加速」」），拿它断言会假通过。
+  /**
+   * 这一版**不再替用户自动切到设置表面**（旧版会自动展开加速块 —— 那时它就在
+   * 正文最上面，展开的代价很小；现在加速住在「设置」表面里，自动切过去会把用户
+   * 从改动清单里拽走）。改成：**把入口放到眼前** —— 提示条里给一个「去设置」。
+   */
   assert.ok(
-    findButton(after, '检测网络') !== undefined,
-    '网络失败要自动把加速设置展开，而不是只说「点 🌐」让用户自己找',
+    findButton(after, '去设置') !== undefined,
+    '网络失败要在提示条里给「去设置」入口，而不是只说「点某处」让用户自己找',
   )
   assert.ok(text.includes('Connection was reset'), '原始报错要保留，用户才能搜')
   assert.ok(text.includes('连不上远端'), '要给出下一步提示')
+
+  // 点它真的能到设置表面（网络加速在那里）。
+  await findButton(after, '去设置').props.onClick()
+  const settings = await react.settle()
+  assert.ok(findButton(settings, '检测网络') !== undefined, '「去设置」应把用户带到加速设置')
 })
 
 test('client standalone：开了加速时，命令结果栏要说明这条命令走了哪条线路', async () => {
@@ -2143,6 +2185,8 @@ test('client standalone：「藏起当前改动」按钮把 stashPush 交给宿�
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  // 「藏起当前改动」在「更多」里（低频；真正需要它的那条路会自动藏）。
+  await findButton(await react.settle(), '更多 ▸').props.onClick()
   const tree = await react.settle()
   const button = flattenTree(tree).find((node) => textOf(node) === '藏起当前改动')
   assert.ok(button !== undefined, '应有「藏起当前改动」按钮')
@@ -2194,7 +2238,7 @@ test('client standalone：提交历史显示 refs 徽章与作者/相对时间�
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  const tree = await openHistory(await react.settle(), react)
   const text = textOf(tree)
   assert.ok(text.includes('main'), 'refs 徽章要显示分支名（HEAD -> main 取箭头后）')
   assert.ok(text.includes('v1'), 'tag 装饰也要显示')
@@ -2229,7 +2273,7 @@ test('client standalone：一条提交挂 4 个引用时，标题不被徽章挤
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  const tree = await openHistory(await react.settle(), react)
 
   const row = flattenTree(tree).find((node) =>
     node !== null && typeof node === 'object' && node.props !== undefined
@@ -2282,7 +2326,7 @@ test('client standalone：引用只有 1~2 个时不出现「+N」（没有噪�
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  const tree = await openHistory(await react.settle(), react)
 
   const row = flattenTree(tree).find((node) =>
     node !== null && typeof node === 'object' && node.props !== undefined
@@ -2317,7 +2361,7 @@ test('client standalone：提交时间显示相对时间（git %ai 的时区偏�
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  const tree = await openHistory(await react.settle(), react)
   const text = textOf(tree)
 
   assert.ok(/小时前/.test(text),
@@ -2468,17 +2512,26 @@ test('client standalone：数组子节点必须都带 key（真实 React 会警�
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   let tree = await react.settle()
   assertKeys(tree)
-  await findButton(tree, '🌐').props.onClick()
+  // ② 各表面的数组子节点也要带 key —— 每切一档都把那一档的树走一遍。
+  tree = await openSurface(tree, react, '设置')
+  assertKeys(tree)
+  tree = await openSurface(tree, react, '分支')
+  assertKeys(tree)
+  tree = await openSurface(tree, react, '历史')
+  assertKeys(tree)
+  tree = await openSurface(tree, react, '改动')
+  assertKeys(tree)
+  // 动作条的「更多」里也有一组并列元素。
+  await findButton(tree, '更多 ▸').props.onClick()
   tree = await react.settle()
   assertKeys(tree)
-  tree = await openBranchManager(tree, react)
-  assertKeys(tree)
+
   await findButton(tree, '拉取').props.onClick()
   tree = await react.settle()
   assert.ok(findButton(tree, '拿成新分支') !== undefined, '前置条件：选项按钮渲染出来了')
   assertKeys(tree)
 
-  // ② 非仓库 + 展开克隆表单
+  // ③ 非仓库 + 展开克隆表单
   const emptyHarness = makeFakeWindow({
     stateResponse: {
       ok: true, dir: '/tmp/demo', isRepo: false, branch: null, upstream: null,
@@ -2493,6 +2546,10 @@ test('client standalone：数组子节点必须都带 key（真实 React 会警�
   await findButton(emptyTree, '克隆仓库').props.onClick()
   emptyTree = await emptyReact.settle()
   assert.ok(findButton(emptyTree, '开始克隆') !== undefined, '前置条件：克隆表单渲染出来了')
+  assertKeys(emptyTree)
+  // 「还不是仓库」时「设置」档也要能进（网络加速与仓库无关 —— 一个 clone 一直失败
+  // 的用户必须有地方去换镜像）。
+  emptyTree = await openSurface(emptyTree, emptyReact, '设置')
   assertKeys(emptyTree)
 })
 
@@ -2709,7 +2766,7 @@ test('client standalone：点最近提交的一行，把提交号交给宿主并
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const initial = await react.settle()
+  const initial = await openHistory(await react.settle(), react)
 
   const row = flattenTree(initial).find((node) =>
     node !== null && typeof node === 'object' && node.props !== undefined
@@ -2750,7 +2807,7 @@ test('client standalone：「切到此」点确认后走 stashSwitch 并带上�
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const initial = await react.settle()
+  const initial = await openHistory(await react.settle(), react)
 
   const checkout = findButton(initial, '切到此')
   assert.ok(checkout !== undefined, '最近提交行右侧应有「切到此」按钮')
@@ -2784,7 +2841,12 @@ test('client standalone：stash 备份能展开、恢复、删除（删除要确
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
 
-  const toggle = findButton(initial, 'stash 备份')
+  // 「藏起当前改动」现在住在「更多」里：它低频，而真正需要它的那条路径
+  // （安全拉取 / 安全切分支）本来就会自动藏，用不着手动。
+  await findButton(initial, '更多 ▸').props.onClick()
+  const withMore = await react.settle()
+
+  const toggle = findButton(withMore, 'stash 备份')
   assert.ok(toggle !== undefined, '应有「stash 备份」入口')
   await toggle.props.onClick()
   const opened = await react.settle()
@@ -2894,8 +2956,11 @@ test('client standalone：变基 / 浅克隆两个开关都要带进对应请求
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
 
-  const rebaseBox = findCheckbox(initial, '变基')
-  assert.ok(rebaseBox !== undefined, '同步区应有「变基」勾选框')
+  // 「变基」改变了 pull 的语义，现在收在「更多」里 —— 它不该和日常动线抢同一行。
+  await findButton(initial, '更多 ▸').props.onClick()
+  const withMore = await react.settle()
+  const rebaseBox = findCheckbox(withMore, '变基')
+  assert.ok(rebaseBox !== undefined, '「更多」里应有「变基」勾选框')
   await rebaseBox.props.onChange({ target: { checked: true } })
   const rebased = await react.settle()
   await findButton(rebased, '拉取').props.onClick()
@@ -3085,6 +3150,93 @@ test('client standalone：分支管理开着时状态一变就重列分支（外
 // 待决定的事），哪些只是装饰（转圈、抬头条）。它们不是内部实现细节 ——
 // 面板长起来之后，「结果滚走了」「不知道自己在哪个分支」正是最常被抱怨的两件事。
 
+test('client standalone：动作条的主操作由状态推导（一屏一个主操作）', async () => {
+  /**
+   * 这一组是「一屏一个主操作」这条主张的可测部分 —— 它之所以可测，是因为
+   * 派生逻辑被提成了纯函数（`deriveActions`）：输入 snapshot，输出主 / 次动作。
+   * 旧版那排硬编码按钮测不出任何东西（它就是一段固定的 DOM）。
+   *
+   * 判据只有一条：**此刻唯一应该点的那一下，是不是被提成了最左边那个实心按钮**。
+   */
+  const mount = async (state) => {
+    const harness = makeFakeWindow({ stateResponse: state })
+    const react = makeStatefulReact()
+    const { exports } = evaluateBundle(harness, react.api)
+    mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+    const tree = await react.settle()
+    return { tree, react }
+  }
+  const barOf = (tree) => findByClass(tree, 'dgs-bar')
+  const primaryOf = (tree) => {
+    const bar = barOf(tree)
+    if (bar === undefined) return undefined
+    // 主操作 = 动作条里那个实心按钮（panelButton 的 primary 档）。
+    return flattenTree(bar).find((node) =>
+      node.type === 'button' && typeof node.props.className === 'string'
+      && node.props.className.includes('dgs-btn-primary'))
+  }
+  const labelsOf = (tree) => {
+    const bar = barOf(tree)
+    if (bar === undefined) return []
+    return flattenTree(bar).filter((node) => node.type === 'button').map((node) => textOf(node))
+  }
+
+  const base = {
+    ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: 'origin/main',
+    ahead: 0, behind: 0, changes: [], changesTotal: 0, log: [], remotes: [],
+  }
+
+  // ① 工作区有未暂存改动 → 主操作是「全部暂存」（提交前必须先暂存）。
+  const dirtyMount = await mount(Object.assign({}, base, {
+    changes: [{ code: ' M', path: 'a.txt', staged: false }], changesTotal: 1,
+  }))
+  const dirty = dirtyMount.tree
+  assert.equal(textOf(primaryOf(dirty)), '全部暂存', '脏工作区的主操作必须是「全部暂存」')
+
+  // ② 有已暂存内容、且落后远端 → 主操作是「拉取」（先拉再推，否则非快进会被拒）。
+  const stagedBehind = (await mount(Object.assign({}, base, {
+    behind: 2,
+    changes: [{ code: 'M ', path: 'a.txt', staged: true }], changesTotal: 1,
+  }))).tree
+  assert.equal(textOf(primaryOf(stagedBehind)), '拉取', '落后时主操作是「拉取」')
+
+  // ③ 已暂存、不落后 → 主操作是「推送」。
+  const stagedAhead = (await mount(Object.assign({}, base, {
+    ahead: 1,
+    changes: [{ code: 'M ', path: 'a.txt', staged: true }], changesTotal: 1,
+  }))).tree
+  assert.equal(textOf(primaryOf(stagedAhead)), '推送', '本地领先时主操作是「推送」')
+
+  // ④ 干净且与上游一致 → 主操作是「获取远程」。
+  const clean = (await mount(base)).tree
+  assert.equal(textOf(primaryOf(clean)), '获取远程', '干净时的主操作是「获取远程」')
+
+  // ⑤ 无论哪一态，动作条上**同一排里不会出现两个同名按钮**（这才是「一个主操作」）。
+  for (const tree of [dirty, stagedBehind, stagedAhead, clean]) {
+    const labels = labelsOf(tree)
+    const dup = labels.filter((label) => labels.indexOf(label) !== labels.lastIndexOf(label))
+    assert.deepEqual(dup, [], '动作条里不该有重复的动词：' + JSON.stringify(labels))
+  }
+
+  // ⑥ 「更多」里的能力是**兜底**：动作条只做排序、不做过滤。用一个「有暂存内容
+  //    也有未暂存内容」的现场（这也是「改了三个文件、先暂存了一个」的真实形状）——
+  //    「撤销暂存」在没有任何已暂存内容时本来就不该出现（那是个无操作按钮），
+  //    所以这里必须先有已暂存的东西才谈得上兜底。
+  const mixedMount = await mount(Object.assign({}, base, {
+    changes: [
+      { code: 'M ', path: 'a.txt', staged: true },
+      { code: ' M', path: 'b.txt', staged: false },
+    ],
+    changesTotal: 2,
+  }))
+  const mixed = mixedMount.tree
+  await findButton(mixed, '更多 ▸').props.onClick()
+  const withMore = await mixedMount.react.settle()
+  assert.ok(findButton(withMore, '撤销暂存') !== undefined,
+    '有已暂存内容时「撤销暂存」必须可达（它在动作条让位给了主操作，但不能消失）')
+  assert.ok(findButton(withMore, '丢弃改动') !== undefined, '「丢弃改动」必须仍然可达')
+})
+
 /** 按 className 找一个元素：className 可能是 'a b' 形态，按词匹配。 */
 function findByClass(tree, className) {
   return flattenTree(tree).find((node) =>
@@ -3093,38 +3245,66 @@ function findByClass(tree, className) {
     && node.props.className.split(' ').includes(className))
 }
 
-/** 状态条上那颗表示「上一次操作成没成」的小点。 */
+/**
+ * 旧版底部状态条上那颗「上一次操作成没成」的小点 —— **已经删掉了**。
+ *
+ * 它的信息并进了上下文条（分支 / 上游 / 领先落后），而「成没成」由提示条
+ * 直接说清楚（成功 ✓ / 失败 ✕ + 原始报错），比一颗要靠颜色猜的小点更明确。
+ * 这个函数保留是为了让「找不到 dgs-status」这件事本身有意义：现在它永远是 undefined。
+ */
 function statusDot(tree) {
   const status = findByClass(tree, 'dgs-status')
   if (status === undefined) return undefined
   return flattenTree(status).find((node) => node.type === 'span' && textOf(node) === '●')
 }
 
-test('client standalone：底部状态条常驻显示分支 / 改动数 / 上游，且不在正文滚动区里', async () => {
+test('client standalone：上下文条常驻显示分支 / 改为「↑领先↓落后」胶囊 / 上游，且不在表面滚动区里', async () => {
   const harness = makeFakeWindow({ stateResponse: REPO_WITH_CHANGES })
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const tree = await react.settle()
 
-  const status = findByClass(tree, 'dgs-status')
-  assert.ok(status !== undefined, '应渲染出底部状态条')
-  const text = textOf(status)
-  assert.ok(text.includes('main'), '状态条要写清当前分支：' + text)
-  assert.ok(text.includes('2 处改动未提交'), '状态条要写清还有多少改动：' + text)
-  assert.ok(text.includes('→ origin/main'), '状态条要写清上游：' + text)
+  // 这一版**删掉了底部状态条**：它与头部的分支上下文信息高度重叠（分支名、上游、
+  // 改动数各出现两次，中间隔着两屏），而底部那一次要滚到底才看得见。
+  // 它的信息并进了上下文条 —— 这条用例因此改成盯上下文条。
+  const head = findByClass(tree, 'dgs-head')
+  assert.ok(head !== undefined, '应渲染出上下文条')
+  const text = textOf(head)
+  assert.ok(text.includes('main'), '上下文条要写清当前分支：' + text)
+  assert.ok(text.includes('→ origin/main'), '上下文条要写清上游：' + text)
 
-  const body = findByClass(tree, 'dgs-body')
-  assert.ok(body !== undefined, '应渲染出正文滚动区')
+  // 领先/落后：旧版是底部状态条里的一句「领先 2 / 落后 1」，现在收成头部一颗胶囊。
+  // （REPO_WITH_CHANGES 的 ahead/behind 都是 0，所以这里换一个真有差额的状态。）
+  const tracking = await (async () => {
+    const h2 = makeFakeWindow({
+      stateResponse: Object.assign({}, REPO_WITH_CHANGES, { ahead: 2, behind: 1 }),
+    })
+    const r2 = makeStatefulReact()
+    const e2 = evaluateBundle(h2, r2.api)
+    mountPanel(e2.exports, r2, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+    return r2.settle()
+  })()
+  const chip = findByClass(tracking, 'dgs-track-chip')
+  assert.ok(chip !== undefined, '领先/落后要有一颗胶囊')
+  const chipText = textOf(chip)
+  assert.ok(chipText.includes('领先 2') && chipText.includes('落后 1'),
+    '胶囊要写清领先 / 落后各几个：' + chipText)
+
+  // 上下文条必须在表面滚动区**之外**：它是常驻的「我在哪儿」，滚走了就等于没有。
+  const surface = findByClass(tree, 'dgs-surface')
+  assert.ok(surface !== undefined, '应渲染出表面滚动区')
   assert.ok(
-    !flattenTree(body).some((node) => node !== null && typeof node === 'object'
-      && node.props !== undefined && node.props.className === 'dgs-status'),
-    '状态条必须在正文滚动区之外，否则一滚就看不见了',
+    flattenTree(surface).every((node) => node === null || typeof node !== 'object'
+      || node.props === undefined || node.props.className === undefined
+      || String(node.props.className).indexOf('dgs-head') < 0),
+    '上下文条必须在表面滚动区之外，否则一滚就看不见了',
   )
-  assert.ok(body.props.ref !== undefined && body.props.ref !== null, '正文要挂 ref（状态条点了要能回到顶部）')
+  // 表面是滚动容器，要挂 ref（动作条 / 表面切换都要能把 scrollTop 归零）。
+  assert.ok(surface.props.ref !== undefined && surface.props.ref !== null, '表面要挂 ref')
 })
 
-test('client standalone：命令结果固定在正文之外，并且可以「清空」收起', async () => {
+test('client standalone：命令结果改成提示条（在表面之外），并且可以「清空」收起', async () => {
   const harness = makeFakeWindow({
     stateResponse: REPO_WITH_CHANGES,
     opResponse: { ok: true, stdout: 'done-ok', state: REPO_WITH_CHANGES },
@@ -3133,29 +3313,31 @@ test('client standalone：命令结果固定在正文之外，并且可以「清
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
-  assert.equal(outputBars(initial).length, 0, '还没操作过就不该有结果区')
+  assert.equal(outputBars(initial).length, 0, '还没操作过就不该有提示条')
   assert.equal(findButton(initial, '清空'), undefined, '没有结果时不该有「清空」')
 
   await findButton(initial, '全部暂存').props.onClick()
   const after = await react.settle()
-  assert.ok(outputBars(after).some((text) => text.includes('done-ok')), '操作结果要出现在结果区')
-  const body = findByClass(after, 'dgs-body')
-  assert.equal(
-    flattenTree(body).filter((node) => node.type === 'pre').length, 0,
-    '结果区必须在正文滚动区之外：点完按钮不用往下翻也知道刚才成没成',
-  )
+  assert.ok(outputBars(after).some((text) => text.includes('done-ok')), '操作结果要出现在提示条里')
 
-  // 点一下状态条（ref 上是假节点，这里自己补一个可写的 scrollTop）也要能工作。
-  const dot = statusDot(after)
-  assert.ok(dot !== undefined, '状态条上应有结果指示点')
+  // **结果不再常驻底部**：旧版面把它钉在底部，于是无论有没有结果，正文都永久少掉
+  // 一块高度。现在它是插在表面之上的一条 —— 有内容才占高度。
+  const surface = findByClass(after, 'dgs-surface')
+  assert.equal(
+    flattenTree(surface).filter((node) => node.type === 'pre').length, 0,
+    '提示条必须在表面滚动区之外：点完按钮不用往下翻也知道刚才成没成',
+  )
+  const toast = findByClass(after, 'dgs-toast')
+  assert.ok(toast !== undefined, '应渲染出提示条')
+  assert.ok(textOf(toast).includes('done-ok'), '提示条要写出结果本身')
 
   await findButton(after, '清空').props.onClick()
   const cleared = await react.settle()
-  assert.equal(outputBars(cleared).length, 0, '「清空」应把结果区收起来')
-  assert.equal(findButton(cleared, '清空'), undefined, '结果区没了，按钮也要跟着消失')
+  assert.equal(outputBars(cleared).length, 0, '「清空」应把提示条收起来')
+  assert.equal(findButton(cleared, '清空'), undefined, '提示条没了，按钮也要跟着消失')
 })
 
-test('client standalone：状态条上的小点跟着上一次操作的结果变色', async () => {
+test('client standalone：提示条按上一次操作的结果分成功 / 失败两态', async () => {
   const harness = makeFakeWindow({
     stateResponse: REPO_WITH_CHANGES,
     opResponses: {
@@ -3167,24 +3349,23 @@ test('client standalone：状态条上的小点跟着上一次操作的结果变
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
-  assert.ok(statusDot(initial).props.style.color.includes('label-tertiary'), '还没操作过时是中性色')
+  // 还没操作过：没有提示条（旧版这里是一颗中性色的灰点）。
+  assert.equal(findByClass(initial, 'dgs-toast'), undefined, '还没操作过时不该有提示条')
 
   await findButton(initial, '全部暂存').props.onClick()
   const okTree = await react.settle()
-  assert.ok(
-    statusDot(okTree).props.style.color.includes('state-success-primary'),
-    '成功之后点要变绿：' + statusDot(okTree).props.style.color,
-  )
+  assert.ok(findByClass(okTree, 'dgs-toast-ok') !== undefined, '成功之后应是成功态提示条')
 
-  await findButton(okTree, '丢弃改动').props.onClick()
+  // 「丢弃改动」现在住在「更多」里（低频 + 不可逆），所以先展开那个菜单。
+  await findButton(okTree, '更多 ▸').props.onClick()
+  const moreTree = await react.settle()
+  await findButton(moreTree, '丢弃改动').props.onClick()
   const failTree = await react.settle()
-  assert.ok(
-    statusDot(failTree).props.style.color.includes('state-error-primary'),
-    '失败之后点要变红：' + statusDot(failTree).props.style.color,
-  )
+  assert.ok(findByClass(failTree, 'dgs-toast-bad') !== undefined, '失败之后应是失败态提示条')
+  assert.ok(textOf(findByClass(failTree, 'dgs-toast-bad')).includes('丢弃失败'), '失败原因要写出来')
 })
 
-test('client standalone：展开 diff 时先给出抬头条（哪个文件、哪一份）', async () => {
+test('client standalone：diff 表面的抬头条写清「哪个文件 / 哪一份」，并给出两档切换', async () => {
   const harness = makeFakeWindow({
     stateResponse: REPO_WITH_CHANGES,
     opResponse: {
@@ -3201,12 +3382,74 @@ test('client standalone：展开 diff 时先给出抬头条（哪个文件、哪
   await clickable.props.onClick()
   const after = await react.settle()
 
-  const bar = findByClass(after, 'dgs-difftitle')
-  assert.ok(bar !== undefined, '展开的 diff 上方应有抬头条')
+  const bar = findByClass(after, 'dgs-crumbs')
+  assert.ok(bar !== undefined, 'diff 表面顶部应有抬头条')
   const text = textOf(bar)
   assert.ok(text.includes('f.txt'), '抬头条要写清是哪个文件：' + text)
-  assert.ok(text.includes('未暂存'), '抬头条要写清这是工作区那份还是已暂存那份：' + text)
+  // 「未暂存 / 已暂存」两档都在：用户要看到「这里有两份、我在哪一份」。
+  // 只给一个「切到已暂存」按钮的话，这一行读起来就是「当前没有状态」。
+  assert.ok(text.includes('未暂存') && text.includes('已暂存'),
+    '抬头条要给出「未暂存 / 已暂存」两档：' + text)
+  const sides = flattenTree(bar).filter((node) =>
+    typeof node.props.className === 'string' && node.props.className.includes('dgs-diff-side'))
+  assert.equal(sides.length, 2, '两档都要画出来')
+  const current = sides.filter((node) => node.props.disabled === true)
+  assert.equal(current.length, 1, '当前那一档 disabled（它同时是「你在这里」的指示）')
+  assert.ok(textOf(current[0]).includes('未暂存'), '这次看的是工作区那份')
   assert.ok(outputBars(after).some((line) => line.includes('+two')), 'diff 内容照常渲染')
+})
+
+test('client standalone：「未暂存 / 已暂存」两档切的是同一个文件的另一份 diff（cached 跟着变）', async () => {
+  /**
+   * 现场：一个文件既改了工作区、又已经暂存过一部分 —— 它们是**两份不同的 diff**
+   * （`git diff` vs `git diff --cached`）。旧版面只能看到「点开的那一行」那一份，
+   * 想看另一份得先暂存/取消暂存、把行翻个面再点一次。
+   *
+   * 这条用例钉两件事：① 点另一档会用 `cached` 取另一份；② 当前那一档是禁用的
+   * （它同时是「你在这一份上」的指示，不该还能再点一次）。
+   */
+  const harness = makeFakeWindow({
+    stateResponse: REPO_WITH_CHANGES,
+    opResponse: {
+      ok: true, diff: 'diff --git a/f.txt b/f.txt\n@@ -1 +1,2 @@\n one\n+two\n', state: REPO_WITH_CHANGES,
+    },
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const initial = await react.settle()
+
+  // 点未暂存的 f.txt 那一行 → diff 表面，当前档是「未暂存」。
+  const clickable = flattenTree(initial).find((node) =>
+    typeof node.props.title === 'string' && node.props.title.includes('点击查看 diff'))
+  await clickable.props.onClick()
+  const opened = await react.settle()
+
+  const diffOps = () => opPayloads(harness).filter((payload) => payload.op === 'diff')
+  assert.equal(diffOps().length, 1, '进 diff 表面应取一次 diff')
+  assert.equal(diffOps()[0].path, 'f.txt')
+  assert.equal(diffOps()[0].cached, false, '工作区那一份不带 cached')
+
+  const sides = flattenTree(findByClass(opened, 'dgs-crumbs')).filter((node) =>
+    typeof node.props.className === 'string' && node.props.className.includes('dgs-diff-side'))
+  const cachedSide = sides.find((node) => textOf(node) === '已暂存')
+  const workSide = sides.find((node) => textOf(node) === '未暂存')
+  assert.equal(workSide.props.disabled, true, '当前档禁用（它表示「你在这一份上」）')
+  assert.equal(cachedSide.props.disabled, false, '另一档可点')
+
+  await cachedSide.props.onClick()
+  const switched = await react.settle()
+  assert.equal(diffOps().length, 2, '点「已暂存」应再取一次 diff')
+  assert.equal(diffOps()[1].path, 'f.txt', '还是同一个文件')
+  assert.equal(diffOps()[1].cached, true, '「已暂存」那一份要带 cached（git diff --cached）')
+
+  // 切换之后，当前档跟着翻面。
+  const after = flattenTree(findByClass(switched, 'dgs-crumbs')).filter((node) =>
+    typeof node.props.className === 'string' && node.props.className.includes('dgs-diff-side'))
+  assert.equal(after.find((node) => textOf(node) === '已暂存').props.disabled, true,
+    '切过去之后「已暂存」变成当前档')
+  assert.equal(after.find((node) => textOf(node) === '未暂存').props.disabled, false,
+    '原来的当前档要能再点回去')
 })
 
 test('client standalone：忙的时候头部是「同步中…」加一个纯装饰的转圈', async () => {
@@ -3394,7 +3637,7 @@ function findInputByPlaceholder(tree, fragment) {
     && node.props.placeholder.includes(fragment))
 }
 
-test('client standalone：本地分支名与上游名不一致时，状态条提前标出来', async () => {
+test('client standalone：本地分支名与上游名不一致时，上下文条提前标出来', async () => {
   const mismatchState = { ...REPO_WITH_CHANGES, branch: 'origin-main', upstream: 'origin/main' }
   const harness = makeFakeWindow({ stateResponse: mismatchState })
   const react = makeStatefulReact()
@@ -3402,10 +3645,13 @@ test('client standalone：本地分支名与上游名不一致时，状态条提
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const tree = await react.settle()
 
+  // 它跟着**分支上下文**走：旧版挂在底部状态条上（要滚到底才看得见），而它讲的正是
+  // 「这一条分支和它的上游对不上」—— 属于上下文，不属于「上一次操作的结果」。
   const warn = findByClass(tree, 'dgs-status-warn')
-  assert.ok(warn !== undefined, '两边名字不一致时状态条要给一个提醒')
+  assert.ok(warn !== undefined, '两边名字不一致时上下文条要给一个提醒')
   assert.equal(textOf(warn), '名称不一致')
   assert.match(String(warn.props.title), /push/, '提示里要说到「推送会被 git 拒绝」这件事')
+  assert.ok(flattenTree(findByClass(tree, 'dgs-head')).includes(warn), '这个提醒要在上下文条里')
 
   // 同名时绝不能出现这个标（否则天天误报，用户就不看了）。
   const normal = makeFakeWindow({ stateResponse: { ...REPO_WITH_CHANGES, branch: 'main', upstream: 'origin/main' } })
@@ -3490,7 +3736,8 @@ test('client standalone：两个远程指向同一地址时给出警告行与一
   const react = makeStatefulReact()
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
-  const tree = await react.settle()
+  // 远程仓库在「设置」表面里（配一次管很久的东西，不占主流程）。
+  const tree = await openRemotesSection(await react.settle(), react)
 
   const row = findByClass(tree, 'dgs-dup-remote')
   assert.ok(row !== undefined, '重复远程要给一行提示')
@@ -3508,12 +3755,21 @@ test('client standalone：两个远程指向同一地址时给出警告行与一
   assert.equal(removed.length, 1, '应该 POST 一次 removeRemote')
   assert.equal(removed[0].name, 'main', '删的必须是提示里点名的那个远程')
 
-  // 没有重复时不该出现这一行（否则天天挂着一条无意义的警告）。
+  /**
+   * 没有重复时不该出现这一行（否则天天挂着一条无意义的警告）。
+   *
+   * 注意这里**必须也切到设置表面**：远程行已经不在默认表面里，直接在默认树上找
+   * 必然是 undefined —— 那样这条「不该出现」的断言会**假通过**（永远为真）。
+   */
   const clean = makeFakeWindow({ stateResponse: { ...REPO_WITH_CHANGES, duplicateRemotes: [] } })
   const cleanReact = makeStatefulReact()
   mountPanel(evaluateBundle(clean, cleanReact.api).exports, cleanReact, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const cleanSettings = await openRemotesSection(await cleanReact.settle(), cleanReact)
+  // 顺手确认这一档真的画了远程行 —— 否则「没有重复提示」还是假通过。
+  assert.ok(findByClass(cleanSettings, 'dgs-remote-row') !== undefined,
+    '前置条件：设置表面里要真的画出远程行')
   assert.equal(
-    findByClass(await cleanReact.settle(), 'dgs-dup-remote'),
+    findByClass(cleanSettings, 'dgs-dup-remote'),
     undefined,
     '没有重复远程时不该有这一行',
   )
@@ -3734,9 +3990,12 @@ test('client standalone：远程行的「推送到此」直接把那个远程交
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
-  const tree = await openRemotesSection(initial, react)
-  assert.equal(findPushTargetSelect(tree).props.value, '', '前置条件：还没选过，默认跟随上游')
 
+  // 「推送到」下拉在改动表面（它是主操作的一部分：决定这次推给谁）。
+  assert.equal(findPushTargetSelect(initial).props.value, '', '前置条件：还没选过，默认跟随上游')
+
+  // 远程行的「推送到此」在「设置」表面里（远程配置那一块）。
+  const tree = await openRemotesSection(initial, react)
   const button = findPushToRemoteButton(tree, 'fork')
   assert.ok(button !== undefined, 'fork 行要有「推送到此」')
   await button.props.onClick()
@@ -3745,14 +4004,17 @@ test('client standalone：远程行的「推送到此」直接把那个远程交
   const pushes = opPayloads(harness).filter((payload) => payload.op === 'push')
   assert.equal(pushes.length, 1, '应 POST 一次 push')
   assert.equal(pushes[0].remote, 'fork', '点哪一行就推哪一行')
-  // 它和「推送到」下拉是同一件事的两个入口：点完要**记住**这个远程，
-  // 否则用户点完这一行再点「推送」会突然推回原处（文档承诺了会记住）。
-  assert.equal(findPushTargetSelect(after).props.value, 'fork', '「推送到此」之后下拉应停在 fork')
   assert.deepEqual(
     JSON.parse(String(harness.storage.get('dsh-git-sidebar-push-remote'))),
     { '/tmp/demo': 'fork' },
     '选择的远程要按仓库记下来',
   )
+
+  // 它和「推送到」下拉是同一件事的两个入口：点完要**记住**这个远程，
+  // 否则用户点完这一行再点「推送」会突然推回原处（文档承诺了会记住）。
+  // 下拉在另一个表面，所以切回改动表面确认它停在 fork。
+  const back = await openSurface(after, react, '改动')
+  assert.equal(findPushTargetSelect(back).props.value, 'fork', '「推送到此」之后下拉应停在 fork')
 })
 
 test('client standalone：记住的远程按仓库分开，且远程没了就干净退回「跟随上游」', async () => {
@@ -3989,7 +4251,10 @@ test('client standalone：「安全拉取」与「拉取」同一个来源（同
   findPullTargetSelect(tree).props.onChange({ target: { value: 'origin' } })
   const picked = await react.settle()
   // 顺手勾上「变基」：它也要跟着一起走（用户在工作区脏的时候点的正是「安全拉取」）。
-  const rebaseBox = findCheckbox(picked, '变基')
+  // 「变基」在「更多」里（它改变 pull 的语义，不该和日常动线抢同一行）。
+  await findButton(picked, '更多 ▸').props.onClick()
+  const withMore = await react.settle()
+  const rebaseBox = findCheckbox(withMore, '变基')
   assert.ok(rebaseBox !== undefined, '「变基」勾选框要在')
   rebaseBox.props.onChange({ target: { checked: true } })
   const rebased = await react.settle()
@@ -4184,8 +4449,9 @@ test('client standalone：远程行的「拉 master」一键从此外拉，并�
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
+  // 「拉取自」下拉在改动表面（主操作的一部分），远程行在「设置」表面。
+  assert.equal(findPullTargetSelect(initial).props.value, '', '前置条件：还没选过，默认跟随上游')
   const tree = await openRemotesSection(initial, react)
-  assert.equal(findPullTargetSelect(tree).props.value, '', '前置条件：还没选过，默认跟随上游')
 
   // origin 那一行的按钮被点名成「拉 master」（与「推送到此」对称的那个入口）。
   const button = findPullFromRemoteButton(tree, 'origin')
@@ -4200,13 +4466,14 @@ test('client standalone：远程行的「拉 master」一键从此外拉，并�
   assert.equal(pulls.length, 1, '应 POST 一次 pull')
   assert.equal(pulls[0].remote, 'origin')
   assert.equal(pulls[0].branch, 'master', '点这一行就是拉它自己的默认分支')
-  // 与「推送到此」同一个承诺：点完要**记住**，否则再点「拉取」会突然拉回原处。
-  assert.equal(findPullTargetSelect(after).props.value, 'origin master', '「从此外拉」之后下拉要停在这一点上')
   assert.deepEqual(
     JSON.parse(String(harness.storage.get('dsh-git-sidebar-pull-remote'))),
     { '/tmp/demo': 'origin master' },
     '远程行的入口也要把它记成这个仓库的来源',
   )
+  // 与「推送到此」同一个承诺：点完要**记住**，否则再点「拉取」会突然拉回原处。
+  const back = await openSurface(after, react, '改动')
+  assert.equal(findPullTargetSelect(back).props.value, 'origin master', '「从此外拉」之后下拉要停在这一点上')
 })
 
 test('client standalone：远程默认分支与当前分支同名时，远程行的按钮退回「拉同名那条」', async () => {
@@ -4241,13 +4508,13 @@ test('client standalone：宿主没有 remoteHeads（旧宿主）时退回老行
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
-  const tree = await openRemotesSection(initial, react)
-
-  const options = (findPullTargetSelect(tree).children ?? []).filter((child) =>
+  // 下拉（改动表面）与远程行（设置表面）分属两档，分别取用。
+  const options = (findPullTargetSelect(initial).children ?? []).filter((child) =>
     child !== null && typeof child === 'object' && child.type === 'option')
   assert.deepEqual(options.map((item) => item.props.value), ['', 'fork', 'origin'],
     '不知道默认分支时不预选分支（只有远程那一项）')
 
+  const tree = await openRemotesSection(initial, react)
   const button = findPullFromRemoteButton(tree, 'origin')
   assert.equal(textOf(button), '从此外拉')
   await button.props.onClick()
@@ -4385,10 +4652,8 @@ test('client standalone：真实现场（两个远程的默认分支都叫 maste
   const realReact = makeStatefulReact()
   mountPanel(evaluateBundle(realHarness, realReact.api).exports, realReact, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const realInitial = await realReact.settle()
-  // 「拉取自」下拉在同步区（不在折叠区块里），但远程行的按钮在收起的远程区块里。
-  const real = await openRemotesSection(realInitial, realReact)
-
-  const options = (findPullTargetSelect(real).children ?? []).filter((child) =>
+  // 「拉取自」下拉在改动表面；远程行的按钮在「设置」表面里。
+  const options = (findPullTargetSelect(realInitial).children ?? []).filter((child) =>
     child !== null && typeof child === 'object' && child.type === 'option')
   assert.deepEqual(options.map((item) => item.props.value),
     ['', 'fork', 'fork master', 'origin', 'origin master'],
@@ -4398,6 +4663,7 @@ test('client standalone：真实现场（两个远程的默认分支都叫 maste
   assert.equal(textOf(options[4]), '从 origin/master 拉')
 
   // 远程行：两行各自都能一键拉到那个远程的默认分支（tooltip 里带各自的远程名）。
+  const real = await openRemotesSection(realInitial, realReact)
   for (const name of ['fork', 'origin']) {
     const button = findPullFromRemoteButton(real, name)
     assert.equal(textOf(button), '拉 master', name + ' 行要点名它自己的默认分支')
@@ -4406,7 +4672,8 @@ test('client standalone：真实现场（两个远程的默认分支都叫 maste
   }
 
   // 选 origin/master 那条 → 行尾命令与发给宿主的参数都点名它，而不是 fork 的。
-  findPullTargetSelect(real).props.onChange({ target: { value: 'origin master' } })
+  const back = await openSurface(real, realReact, '改动')
+  findPullTargetSelect(back).props.onChange({ target: { value: 'origin master' } })
   const picked = await realReact.settle()
   await findButton(picked, '拉取').props.onClick()
   await realReact.settle()
@@ -4431,13 +4698,14 @@ test('client standalone：当前分支正好就是远端默认分支的名字时
   const { exports } = evaluateBundle(harness, react.api)
   mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
   const initial = await react.settle()
-  const tree = await openRemotesSection(initial, react)
 
-  const options = (findPullTargetSelect(tree).children ?? []).filter((child) =>
+  // 下拉在改动表面，远程行在「设置」表面。
+  const options = (findPullTargetSelect(initial).children ?? []).filter((child) =>
     child !== null && typeof child === 'object' && child.type === 'option')
   assert.deepEqual(options.map((item) => item.props.value), ['', 'fork', 'origin'],
     '两个远程的默认分支都叫 master、当前分支也叫 master → 都不多给一项')
   // 远程行的按钮同样退回不点名分支的那一种。
+  const tree = await openRemotesSection(initial, react)
   assert.equal(textOf(findPullFromRemoteButton(tree, 'origin')), '从此外拉')
 })
 

@@ -247,7 +247,10 @@ test('network：提示区分「还没开加速」和「开了还是不通」，�
   const cold = networkHint(false)
   const warm = networkHint(true)
   assert.notEqual(cold, warm)
-  assert.match(cold, /🌐/, '没开过加速时要告诉用户按钮在哪')
+  // 文案必须指向**现在还存在的**入口：网络加速已从头部那个 🌐 按钮搬进「设置」表面，
+  // 失败提示条上有「去设置」直达按钮。照着旧文案去找 🌐 会找不到东西。
+  assert.match(cold, /去设置/, '没开过加速时要告诉用户入口在哪')
+  assert.doesNotMatch(cold, /🌐/, '不能再指向已经删掉的 🌐 按钮')
   assert.match(cold, /镜像/)
   assert.match(cold, /代理/)
   assert.match(warm, /代理/, '开了还不通时要指向更可靠的那条路')
@@ -732,7 +735,7 @@ test(
 )
 
 test(
-  'network：[集成] 网络类失败会带上 network 标记和「点 🌐」的提示，供面板自动展开设置',
+  'network：[集成] 网络类失败会带上 network 标记和「去设置」的提示，供面板给出直达入口',
   { skip: process.platform === 'win32' ? '假 git 用 sh 脚本，仅 POSIX' : false },
   async () => {
     const fakeDir = await mkdtemp(join(tmpdir(), 'git-sidebar-fake-'))
@@ -755,7 +758,8 @@ test(
       // 关键接线：classifyPushFailure 对网络类报错只会返回 none，若提示只问它，
       // 用户就什么都看不到 —— 必须由 classifyNetworkFailure 兜住。
       assert.equal(data.network, true)
-      assert.match(String(data.hint), /🌐/, '要告诉用户按钮在哪')
+      // 面板靠 data.network 在失败提示条上给出「去设置」按钮；文案本身指向那个按钮。
+      assert.match(String(data.hint), /去设置/, '要告诉用户入口在哪')
       assert.equal(data.accelerated, 'direct')
     } finally {
       fake.restore()
