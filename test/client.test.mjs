@@ -331,6 +331,80 @@ test('client standalone：bundle 是普通脚本，没有 ESM / JSX / TS 语法'
   assert.doesNotMatch(CLIENT_SOURCE, /:\s*(string|number|boolean|any)\b/, 'bundle 不能有 TS 类型标注')
 })
 
+// ── 1b. 强调色（--dgs-accent*）的取值链 ────────────────────────────────────
+//
+// 这一组盯的是**一个我这次真踩过的坑**：强调色 trio 有三个档位，用途不同、
+// 光学要求也不同，混用会在某一条分支上悄悄跌破对比度阈值：
+//   · --dgs-accent       装饰：短杠 / 顶条 / 描边 / 定位条。它们是**图形**，阈 3:1。
+//                        宿主的 state-business-primary 生色（浅 #4176e6）压白底 4.23:1，够用。
+//   · --dgs-accent-text  文字：胶囊文字 / 当前跟踪徽章 / hot 按钮。**正文**，阈 4.5:1。
+//                        生色压自己的 8% 底只有 3.84:1 —— 不够，所以必须走压过前景色的那一档。
+//   · --dgs-accent-tint  极淡底色：胶囊底 / 展开行 / 选中行。百分比被行内小符号
+//                        （○ / ▼，阈 3:1）和成功色文字（阈 4.5:1）两头夹住。
+//
+// 最容易被忽略的是**兜底链**：`color-mix` 不支持时退回哪一档。退回「生」的强调蓝
+// 就等于把上面那条 3.84:1 的坑重新踩回来（HEAD 在这一处用 brand-primary，那样才是对的）。
+test('client standalone：强调色的文字档不能退回「生」的强调蓝（兜底链也要过阈值）', () => {
+  // --dgs-accent-text 的定义（color-mix 支）必须把强调色朝 label-primary 压，
+  // 而不是直接用强调色。
+  const textDef = /--dgs-accent-text:color-mix\(in srgb,var\(--dsw-alias-state-business-primary[^)]*\)\s*\d+%,var\(--dsw-alias-label-primary/
+  assert.match(CLIENT_SOURCE, textDef,
+    '--dgs-accent-text 必须是「强调色 × label-primary」的 color-mix：'
+    + '直接用生强调色当 11px 正文，压自己那层浅底只有 3.84:1')
+
+  // @supports 兜底支：--dgs-accent-text 要退回随主题翻转的前景色档（brand-primary），
+  // 不能退回 state-business-primary 生色。
+  const supportsBlock = CLIENT_SOURCE.match(/@supports not \(color:color-mix\([^)]*\)\)\{[^']*--dgs-accent-text:([^;}]+)/)
+  assert.ok(supportsBlock !== null, '应有 @supports not (color:color-mix(...)) 兜底支')
+  assert.match(supportsBlock[1], /--dsw-alias-brand-primary/,
+    '兜底支的 --dgs-accent-text 必须退回 brand-primary（随主题翻转），'
+    + '退回 state-business-primary 生色会让白底只剩 4.23:1、胶囊底 3.84:1，都过不了正文阈值')
+
+  // 抖一遍全文件：凡是 --dgs-accent-text 的**内联兜底**（closing fallback）都不能落在
+  // 生强调色上。合法形态只允许 brand-primary / label-primary。
+  const badFallbacks = [...CLIENT_SOURCE.matchAll(/var\(--dgs-accent-text,\s*(?:var\()?(--[\w-]+)/g)]
+    .map((m) => m[1])
+    .filter((name) => name !== '--dsw-alias-brand-primary' && name !== '--dsw-alias-label-primary')
+  assert.deepEqual(badFallbacks, [],
+    '--dgs-accent-text 的兜底只能是 brand-primary / label-primary（随主题翻转的前景色档）：'
+    + JSON.stringify(badFallbacks))
+
+  // --dgs-accent（装饰档）反过来不该被「压」——它是给图形用的生色，
+  // 压过就失去了描边/顶条该有的分量。
+  assert.match(CLIENT_SOURCE, /--dgs-accent:var\(--dsw-alias-state-business-primary/,
+    '--dgs-accent 是装饰档，直接用宿主的交互强调色')
+})
+
+test('client standalone：兜底色阶的兜底百分比要和定义一致（别一边 8% 一边 16%）', () => {
+  // --dgs-accent-tint 当前定义在 8%（见 S 里的注释：12% 会把行内成功色压到 4.49:1）。
+  const def = CLIENT_SOURCE.match(/--dgs-accent-tint:color-mix\([^;]*?(\d+)%,transparent\)/)
+  assert.ok(def !== null, '应有 --dgs-accent-tint 的 color-mix 定义')
+  const percent = Number(def[1])
+  assert.ok(percent >= 6 && percent <= 10,
+    '--dgs-accent-tint 的百分比必须落在 6–10%：太高会把行内小符号/成功色压到阈值以下，'
+    + '太低则「选中了」看不出来。当前 ' + percent + '%')
+
+  // 只看**替 --dgs-accent-tint 兜底**的那些值 —— 它们必须与定义同百分比。
+  // 不能全文扫 rgba(37,99,235,...)：diff 区块里的那几条（hunk 底 .08 + color-mix 10%）
+  // 与闪烁动画的 .35 属于**别的调色板**（diff 行底 / 一次性脉冲），早在 HEAD 就存在，
+  // 与强调底色阶无关；把它们一起断言只会制造一条假失败。
+  const fallbacks = [...CLIENT_SOURCE.matchAll(/var\(--dgs-accent-tint,\s*rgba\(37,\s*99,\s*235,\s*\.(\d+)\)\)/g)]
+    .map((m) => Number('0.' + m[1]))
+  assert.ok(fallbacks.length >= 3,
+    '应有若干处 --dgs-accent-tint 的 rgba 兜底（胶囊底 / 焦点环 / 展开行 / 选中行），实际 ' + fallbacks.length)
+  for (const value of fallbacks) {
+    assert.ok(Math.abs(value - percent / 100) < 0.001,
+      'var(--dgs-accent-tint, rgba(37,99,235,' + value + ')) 的兜底与定义的 ' + percent + '% 不一致：'
+      + '兜底值虽然不会在支持 color-mix 的引擎里生效，但两处对不上会误导后来改它的人')
+  }
+
+  // @supports 兜底支里的 --dgs-accent-tint 也要同值。
+  const supportsTint = CLIENT_SOURCE.match(/@supports not \(color:color-mix\([^)]*\)\)\{[^']*--dgs-accent-tint:rgba\(37,99,235,\.(\d+)\)/)
+  assert.ok(supportsTint !== null, '@supports 支里应有 --dgs-accent-tint 的兜底')
+  assert.ok(Math.abs(Number('0.' + supportsTint[1]) - percent / 100) < 0.001,
+    '@supports 支里的 --dgs-accent-tint 兜底与定义不一致：' + supportsTint[1])
+})
+
 // ── 2. 界面注册：三种时机 ──────────────────────────────────────────────────
 
 /** 造一个 mock slots 服务，记录 register 调用与顺序。 */
@@ -2135,6 +2209,123 @@ test('client standalone：提交历史显示 refs 徽章与作者/相对时间�
   const page = calls.find((payload) => payload.op === 'logPage')
   assert.ok(page !== undefined, '点「加载更多」应 POST op=logPage')
   assert.equal(page.skip, 8, 'skip = 已加载条数')
+})
+
+// 现场（真实截图）：一条提交挂着 4 个引用
+//   `HEAD -> master, tag: dsh-v0.2.1-alpha.1, origin/master, origin/HEAD`
+// ——「最近提交」整列只看得到被压没的 `Merge pull reques…`，标题等于没有。
+// 回归的是：**无论挂多少引用，提交标题都必须拿到宽度**。徽章靠 CSS 收缩（这里
+// 只能验组件侧的两条约定）：一行最多内联 2 个 + `+N` 收尾，且每个徽章本身
+// 不再是 `flex:0 0 auto`（那正是把标题挤到 0 宽的原因）。
+test('client standalone：一条提交挂 4 个引用时，标题不被徽章挤没（内联 2 个 + +N）', async () => {
+  const refsLine = 'HEAD -> master, tag: dsh-v0.2.1-alpha.1, origin/master, origin/HEAD'
+  const repoState = {
+    ok: true, dir: '/tmp/demo', isRepo: true, branch: 'master', upstream: 'origin/master',
+    ahead: 0, behind: 0, changes: [], changesTotal: 0,
+    log: [{ hash: '5badb150', subject: 'Merge pull request #5650 from deepseek-harness/x', refs: refsLine, author: '张三', date: '2026-01-01 10:00:00 +0800' }],
+    remotes: [],
+  }
+  const harness = makeFakeWindow({ stateResponse: repoState })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const tree = await react.settle()
+
+  const row = flattenTree(tree).find((node) =>
+    node !== null && typeof node === 'object' && node.props !== undefined
+    && typeof node.props.onClick === 'function' && textOf(node).startsWith('5badb150'))
+  assert.ok(row !== undefined, '提交行要在：' + textOf(tree).slice(-300))
+
+  // 标题原样渲染在文档里（宽度问题由 flex 布局解决，组件不能靠截断标题来腾地方）。
+  assert.ok(textOf(row).includes('Merge pull request #5650 from deepseek-harness/x'),
+    '提交标题要完整渲染（不许为了让位而被组件截断）')
+
+  // 引用徽章：tooltip 里必须仍能问出**全量**（4 个都在），哪怕只内联了 2 个。
+  const chipTitles = flattenTree(row)
+    .filter((node) => node.type === 'span' && typeof node.props.title === 'string')
+    .map((node) => node.props.title)
+  for (const ref of ['master', 'dsh-v0.2.1-alpha.1', 'origin/master', 'origin/HEAD']) {
+    assert.ok(chipTitles.some((title) => title === ref || title.includes(ref)),
+      '每个引用都要有落脚点（内联或在 +N 的 tooltip 里）：' + ref + '，实际：' + JSON.stringify(chipTitles))
+  }
+
+  // 内联上限：git 顺序（HEAD -> master 的 master、tag）在前，其余 2 个收进 +2。
+  const more = flattenTree(row).find((node) => textOf(node) === '+2')
+  assert.ok(more !== undefined, '超出的 2 个引用要收进一个「+2」徽章')
+  assert.ok(String(more.props.title).includes('origin/master')
+    && String(more.props.title).includes('origin/HEAD'),
+    '「+2」的 tooltip 要点名收起来的是哪两个：' + String(more.props.title))
+
+  // 不允许有第 3 个「真名」徽章和 +N 一起内联。
+  assert.ok(textOf(row).includes('master') && textOf(row).includes('dsh-v0.2.1-alpha.1'),
+    '前两个（本地分支 + tag）要内联可见')
+
+  // 徽章自己必须可收缩：`flex:0 0 auto` 正是把标题压到 0 宽的那条规则。
+  const chips = flattenTree(row)
+    .filter((node) => node.type === 'span' && typeof node.props.title === 'string'
+      && node.props.style !== undefined && node.props.style.borderRadius === '999px')
+  assert.ok(chips.length >= 3, '该有 2 个内联徽章 + 1 个「+N」：' + chips.length)
+  for (const chip of chips) {
+    assert.notEqual(chip.props.style.flex, '0 0 auto',
+      '引用徽章必须可收缩（否则 4 个一起把标题挤成 0 宽）：' + JSON.stringify(chip.props.style))
+  }
+})
+
+test('client standalone：引用只有 1~2 个时不出现「+N」（没有噪点）', async () => {
+  const repoState = {
+    ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: 'origin/main',
+    ahead: 0, behind: 0, changes: [], changesTotal: 0,
+    log: [{ hash: 'abc1234', subject: 'fix: 修好它', refs: 'HEAD -> main, origin/main', author: '张三', date: '2026-01-01 10:00:00 +0800' }],
+    remotes: [],
+  }
+  const harness = makeFakeWindow({ stateResponse: repoState })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const tree = await react.settle()
+
+  const row = flattenTree(tree).find((node) =>
+    node !== null && typeof node === 'object' && node.props !== undefined
+    && typeof node.props.onClick === 'function' && textOf(node).startsWith('abc1234'))
+  assert.ok(row !== undefined, '提交行要在')
+  const plusBadge = flattenTree(row).find((node) => /^\+\d+$/.test(textOf(node)))
+  assert.equal(plusBadge, undefined, '只有 2 个引用时不该出现「+N」：' + textOf(row))
+  assert.ok(textOf(row).includes('main') && textOf(row).includes('origin/main'), '两个都直接可见')
+})
+
+// 回归：`relativeTime` 原先写的是 `Date.parse(text.replace(' ', 'T'))`，
+// 而 git `%ai` 的 `2026-01-01 10:00:00 +0800` 换成 T 之后是
+// `2026-01-01T10:00:00 +0800` —— 这个形状 Date.parse 返回 NaN（偏移前带空格、
+// 且缺冒号都不是合法 ISO），于是**永远退回绝对日期**：「3 天前」这一档从来没
+// 生效过，提交行里却一直显示最占宽度的 `2026-01-01 10:00`。
+// 这里直接从渲染结果反推：新近的提交必须显示相对时间，很久以前的才退回绝对日期。
+test('client standalone：提交时间显示相对时间（git %ai 的时区偏移要被正确解析）', async () => {
+  const recent = new Date(Date.now() - 2 * 60 * 60 * 1000) // 2 小时前
+  const pad = (n) => String(n).padStart(2, '0')
+  const gitDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+    + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())} +0800`
+  const repoState = {
+    ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: null,
+    ahead: 0, behind: 0, changes: [], changesTotal: 0,
+    log: [
+      { hash: 'aaa1111', subject: '刚提交的', refs: '', author: '张三', date: gitDate(recent) },
+      { hash: 'bbb2222', subject: '很久以前', refs: '', author: '李四', date: '2000-01-01 10:00:00 +0800' },
+    ],
+    remotes: [],
+  }
+  const harness = makeFakeWindow({ stateResponse: repoState })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const tree = await react.settle()
+  const text = textOf(tree)
+
+  assert.ok(/小时前/.test(text),
+    '2 小时前的提交要显示「N 小时前」（不能退回绝对日期）：' + text.slice(-400))
+  assert.ok(/26 年前/.test(text),
+    '久远日期要走「N 年前」那一档：' + text.slice(-400))
+  assert.ok(!text.includes('2000-01-01 10:00:00'),
+    '作者日期不该整串原样出现（解析成功时就不该再露绝对日期）')
 })
 
 test('client standalone：diff 升级 —— 配对的删/增渲染成「改」行，长上下文折叠可展开', async () => {
