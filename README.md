@@ -510,6 +510,28 @@ isConflictCode、logPage 的 argv/解析、addDir、目录树折叠/压缩、冲
   这是有意的（改动是默认动线），但如果用起来觉得「我总是在历史页」，可以再加一个
   localStorage 记忆 —— 现在不做，避免又多一个要维护的界面偏好。
 
+### 已修：桌面版点「?」没反应
+
+桌面版（Electron）把页面托在自定义协议 `dsh-app://app/` 下，而头部那个「?」原本写死
+相对路径 `/git-sidebar/help` —— 它会被解析成 `dsh-app://app/git-sidebar/help`。
+主窗口的 `setWindowOpenHandler` 只对 `http:` / `https:` 调 `shell.openExternal()`，
+其余协议一律返回 `{ action: 'deny' }`，于是链接被**静默吞掉**：不报错、不开页，
+用户看到的就是「点了没反应」（Web 版不受影响，因为页面本身就是 http(s) 源）。
+
+现在按页面协议选地址（`lib/client.js` 的 `helpDocUrl()`）：
+
+| 页面协议 | 帮助链接 |
+| --- | --- |
+| `http:` / `https:`（Web 版、公开部署） | 相对路径 `/git-sidebar/help` —— 与插件路由的注册形状一致（宿主按 origin-root 注册路由） |
+| 其它（桌面版 `dsh-app:`） | 宿主 HTTP 源的绝对地址：`__DSH_TRANSPORT__.streamBaseUrl` + `/git-sidebar/help` |
+| 拿不到 `streamBaseUrl`（老壳 / boot 未注入） | 退回相对路径，不留死链 |
+
+`streamBaseUrl` 是桌面壳在 boot 时注入的宿主 HTTP 源（见 `apps/desktop/src/main.ts` 的
+`dshDesktopBoot.ready()` 与 `apps/web/src/main.ts`，值取自 `new URL(hostUrl).origin`）。
+帮助路由是纯静态内容（不读仓库、不执行 git），本身**不要求浏览器会话 cookie** ——
+实测未带 cookie 直接请求仍回 200 —— 所以换成系统浏览器打开照常可用。
+回归用例见 `test/client.test.mjs` 的「帮助入口」一组（四条分支）。
+
 ---
 
 ## 验收清单（首次安装后人工确认）

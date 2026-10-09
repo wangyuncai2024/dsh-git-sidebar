@@ -224,6 +224,12 @@ function makeFakeWindow(options = {}) {
     },
     dispatchEvent: () => true,
     confirm: () => true,
+    // 页面自身的地址 + 桌面壳注入的宿主 HTTP 源。缺省按 **Web 版**（http: 页面）建模 ——
+    // 老用例一行都不用改；要验桌面版（dsh-app:// 页面）就显式传 location / streamBaseUrl。
+    location: options.location ?? { protocol: 'http:', hostname: '127.0.0.1', origin: 'http://127.0.0.1:52385' },
+    __DSH_TRANSPORT__: options.streamBaseUrl === undefined || options.streamBaseUrl === null
+      ? { ownsHost: true }
+      : { ownsHost: true, streamBaseUrl: options.streamBaseUrl },
   }
   const stateResponse = options.stateResponse ?? {
     ok: true, dir: '/tmp/demo', isRepo: false, branch: null, upstream: null,
@@ -2671,6 +2677,80 @@ test('client standalone：推导不出网页地址（本地路径 / 老宿主没
   assert.equal(legacyLinks.length, 0, '没回 pageUrl 时宁可没有入口，不能给出死链')
 })
 
+// ── 7b. 帮助入口（头部的「?」）：桌面版不能变成点了没反应的死链 ─────────────
+//
+// 现场：桌面版把页面托在 **`dsh-app://app/`** 自定义协议下。写死的相对路径
+// `/git-sidebar/help` 会被解析成 `dsh-app://app/git-sidebar/help`，而主窗口的
+// setWindowOpenHandler 只对 http/https 调 shell.openExternal、其余一律 deny ——
+// 于是点「?」**毫无反应**（不报错、不开页）。这一组用例把三条分支都钉住：
+// Web 版仍走相对路径（与插件路由的注册形状一致），桌面版换宿主 HTTP 源的绝对地址，
+// 拿不到源时退回相对路径而不是造死链。
+
+/** 取头部那个「?」帮助链接（按 class 找，不依赖它会落在树里的第几个）。 */
+function helpLink(tree) {
+  return flattenTree(tree).find((node) =>
+    node !== null && typeof node === 'object' && node.type === 'a'
+    && typeof node.props.className === 'string'
+    && node.props.className.split(' ').includes('dgs-mini'))
+}
+
+test('client standalone：Web 版（http 页面）的帮助链接保持相对路径', async () => {
+  const harness = makeFakeWindow({ location: { protocol: 'http:', hostname: '127.0.0.1', origin: 'http://127.0.0.1:52385' } })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const link = helpLink(await react.settle())
+  assert.ok(link !== undefined, '头部应有帮助链接')
+  assert.equal(link.props.href, '/git-sidebar/help',
+    'http(s) 页面上相对路径就够：与插件路由的注册形状一致，不必拼 origin')
+  assert.equal(link.props.target, '_blank', '要新标签页打开')
+  assert.equal(link.props.rel, 'noopener noreferrer', '新标签页链接要带 rel=noopener')
+})
+
+test('client standalone：桌面版（dsh-app 页面）的帮助链接改指宿主 HTTP 源，否则被 setWindowOpenHandler 拒掉', async () => {
+  const harness = makeFakeWindow({
+    location: { protocol: 'dsh-app:', hostname: 'app', origin: 'dsh-app://app' },
+    streamBaseUrl: 'http://127.0.0.1:52385',
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const link = helpLink(await react.settle())
+  assert.ok(link !== undefined, '头部应有帮助链接')
+  assert.equal(link.props.href, 'http://127.0.0.1:52385/git-sidebar/help',
+    '桌面版必须给 http(s) 绝对地址 —— dsh-app: 协议的 target=_blank 会被 '
+    + 'setWindowOpenHandler 的 {action:"deny"} 静默吞掉，用户看到的就是「点了没反应」')
+  assert.equal(link.props.target, '_blank', '要新标签页打开（由壳交给系统浏览器）')
+})
+
+test('client standalone：桌面版拿不到宿主源时退回相对路径，而不是把入口变成死链', async () => {
+  // 老壳 / boot 尚未注入：__DSH_TRANSPORT__ 上可能没有 streamBaseUrl。
+  const harness = makeFakeWindow({
+    location: { protocol: 'dsh-app:', hostname: 'app', origin: 'dsh-app://app' },
+    streamBaseUrl: null,
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const link = helpLink(await react.settle())
+  assert.ok(link !== undefined, '拿不到宿主源也得留着入口，不能整条链接消失')
+  assert.equal(link.props.href, '/git-sidebar/help',
+    '读不到可选的 streamBaseUrl 时退回相对路径（至少 Web 版仍可用），不要拼出 undefined 前缀')
+})
+
+test('client standalone：桌面版宿主源带挂载前缀 / 结尾斜杠时，拼接不出现双斜杠', async () => {
+  const harness = makeFakeWindow({
+    location: { protocol: 'dsh-app:', hostname: 'app', origin: 'dsh-app://app' },
+    streamBaseUrl: 'https://proxy.example:8443/web/',
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const link = helpLink(await react.settle())
+  assert.ok(link !== undefined, '头部应有帮助链接')
+  assert.equal(link.props.href, 'https://proxy.example:8443/web/git-sidebar/help',
+    '结尾斜杠要去掉再接路径，否则得到 //git-sidebar/help')
+})
 
 // ── 8. 新增交互：单文件操作 / 提交详情 / stash 备份 / 安全切分支 / 提交并推送 ──
 //
