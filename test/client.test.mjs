@@ -2261,6 +2261,64 @@ test('client standalone：提交历史显示 refs 徽章与作者/相对时间�
   assert.equal(page.skip, 8, 'skip = 已加载条数')
 })
 
+// 回归的是**一个真 bug**：提交列表曾把渲染条数写死成 `slice(0, 8)`（首屏条数）。
+// 于是点一次「加载更多」之后 ——
+//   · 宿主追加回 20 条，snapshot.log 变成 28 条；
+//   · 列表仍然只画前 8 条：新拿到的那 20 条**一条都不出现**；
+//   · 而按钮可见性按 `length % 8 === 0 && length < 28` 判定，28 条时正好收起。
+// 净效果：点一下界面毫无反应，按钮还消失了 —— 用户只会认为面板坏了。
+// 这里钉住「加载更多之后，新拿到的提交必须真的画出来」。
+test('client standalone：点「加载更多」后新加载的提交真的出现在列表里（列表不写死前 8 条）', async () => {
+  const firstPage = Array.from({ length: 8 }, (_, index) => ({
+    hash: 'c0' + index, subject: 'first-' + index, refs: '', author: '', date: '',
+  }))
+  const nextPage = Array.from({ length: 20 }, (_, index) => ({
+    hash: 'n' + String(index).padStart(2, '0'), subject: 'next-' + index, refs: '', author: '', date: '',
+  }))
+  const harness = makeFakeWindow({
+    stateResponse: {
+      ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: null,
+      ahead: 0, behind: 0, changes: [], changesTotal: 0, log: firstPage, remotes: [],
+    },
+    opResponses: {
+      logPage: {
+        ok: true,
+        logPage: { entries: nextPage, count: nextPage.length },
+        state: null,
+        notes: [],
+      },
+    },
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  let tree = await openHistory(await react.settle(), react)
+
+  const rowsBefore = flattenTree(tree).filter((node) =>
+    node !== null && typeof node === 'object' && typeof node.props === 'object'
+    && typeof node.props.className === 'string'
+    && node.props.className.split(' ').includes('dgs-logrow'))
+  assert.equal(rowsBefore.length, 8, '首屏应画出 8 条，实际 ' + rowsBefore.length)
+
+  const more = flattenTree(tree).find((node) =>
+    typeof node.props.title === 'string' && node.props.title.includes('加载更多'))
+  assert.ok(more !== undefined, '满 8 条时应出现「加载更多」')
+  await more.props.onClick()
+  tree = await react.settle()
+
+  // 核心断言：追加进来的 20 条必须出现（前 8 条 + 后 20 条 = 28）。
+  const rowsAfter = flattenTree(tree).filter((node) =>
+    node !== null && typeof node === 'object' && typeof node.props === 'object'
+    && typeof node.props.className === 'string'
+    && node.props.className.split(' ').includes('dgs-logrow'))
+  assert.equal(rowsAfter.length, 28,
+    '点「加载更多」后 8+20=28 条都要画出来（写死 slice(0,8) 时这里会停在 8）')
+
+  const text = textOf(tree)
+  assert.ok(text.includes('next-0') && text.includes('next-19'),
+    '新加载的提交标题要出现在面板里')
+})
+
 // 现场（真实截图）：一条提交挂着 4 个引用
 //   `HEAD -> master, tag: dsh-v0.2.1-alpha.1, origin/master, origin/HEAD`
 // ——「最近提交」整列只看得到被压没的 `Merge pull reques…`，标题等于没有。
@@ -3317,6 +3375,246 @@ test('client standalone：动作条的主操作由状态推导（一屏一个主
   assert.ok(findButton(withMore, '丢弃改动') !== undefined, '「丢弃改动」必须仍然可达')
 })
 
+/**
+ * 窄栏下被 CSS 收走的动词，必须在「更多」里留一份能点的副本。
+ *
+ * 回归的是「注释说收进「更多」，而「更多」里根本没有」这一类 bug：PANEL_CSS 用
+ * `.dgs-bar-rest .dgs-collapse{display:none}` 把「获取远程 / 安全拉取」在 < 560px
+ * 藏掉，而 MoreActions 只画 unstageAll / discard / stash / 变基 —— 于是这两个动词
+ * 在整个面板里**一个入口都不剩**。实测 300px 与 420px（右侧栏默认宽）两档复现：
+ * 「获取远程」既不在动作条上、也不在「更多」里。
+ *
+ * 这条用例钉住三件事：
+ *   ① 被收的动词在「更多」里有副本，且副本挂 `.dgs-narrow-only`（宽栏隐藏）；
+ *   ② 副本**不挂** `.dgs-collapse`（挂上就等于把同一把刀递给将来那条规则）；
+ *   ③ 主操作不进副本：干净工作区下「获取远程」正是主操作，它不在 `.dgs-bar-rest`
+ *      里、CSS 收不到它 —— 此时再补一份副本会让同一个动词出现两个入口。
+ */
+test('client standalone：窄栏收起的同步动词在「更多」里有副本（收掉 ≠ 消失）', async () => {
+  const mount = async (state) => {
+    const harness = makeFakeWindow({ stateResponse: state })
+    const react = makeStatefulReact()
+    const { exports } = evaluateBundle(harness, react.api)
+    mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+    const tree = await react.settle()
+    return { tree, react }
+  }
+  const base = {
+    ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: 'origin/main',
+    ahead: 0, behind: 0, changes: [], changesTotal: 0, log: [], remotes: [],
+  }
+  /** 「更多」面板里的按钮（副本都在这里）。 */
+  const moreButtons = (tree) => {
+    const menu = findByClass(tree, 'dgs-more-menu')
+    if (menu === undefined) return []
+    return flattenTree(menu).filter((node) => node.type === 'button')
+  }
+
+  // ① 脏工作区：次级组是「拉取 / 推送 / 获取远程 / 安全拉取」，
+  //    窄栏收掉后两个 —— 两个都必须在「更多」里补上。
+  const dirtyMount = await mount(Object.assign({}, base, {
+    changes: [{ code: ' M', path: 'a.txt', staged: false }], changesTotal: 1,
+  }))
+  await findButton(dirtyMount.tree, '更多 ▸').props.onClick()
+  const dirtyMore = await dirtyMount.react.settle()
+  for (const label of ['获取远程', '安全拉取']) {
+    const copy = moreButtons(dirtyMore).find((node) => textOf(node) === label)
+    assert.ok(copy !== undefined,
+      '窄栏会收掉「' + label + '」，它必须在「更多」里有一份副本（否则窄栏下完全不可达）')
+    // ② 副本必须是「窄栏可见、宽栏隐藏」，且不被收起规则命中。
+    const classes = String(copy.props.className).split(' ')
+    assert.ok(classes.includes('dgs-narrow-only'),
+      '副本要挂 .dgs-narrow-only（宽栏隐藏：那时动作条上已经有一个了）')
+    assert.ok(!classes.includes('dgs-collapse'),
+      '副本不能挂 .dgs-collapse —— 它的存在意义就是「不被窄栏规则收走」')
+  }
+  // 副本点下去要真的执行同一个动作（不是个装饰按钮）。
+  const fetchCopy = moreButtons(dirtyMore).find((node) => textOf(node) === '获取远程')
+  assert.equal(typeof fetchCopy.props.onClick, 'function', '副本必须可点')
+  assert.equal(String(fetchCopy.props.title).includes('fetch --all --prune'), true,
+    '副本的 tooltip 要与动作条上那份一致（同一个动词不能两套说明）')
+
+  // ③ 干净工作区：「获取远程」是**主操作**（不在 .dgs-bar-rest 里，CSS 收不到它），
+  //    此时不该有任何副本 —— 否则同一个动词有两个入口。
+  const cleanMount = await mount(base)
+  await findButton(cleanMount.tree, '更多 ▸').props.onClick()
+  const cleanMore = await cleanMount.react.settle()
+  assert.equal(moreButtons(cleanMore).filter((node) => textOf(node) === '获取远程').length, 0,
+    '「获取远程」当主操作时不该再在「更多」里出现（它本来就没被收走）')
+  // 主操作确实在动作条上（这一条同时守住「主操作不参与收起」这条前提）。
+  const bar = findByClass(cleanMount.tree, 'dgs-bar')
+  const primary = flattenTree(bar).find((node) =>
+    node.type === 'button' && String(node.props.className).includes('dgs-btn-primary'))
+  assert.equal(textOf(primary), '获取远程', '干净工作区的主操作是「获取远程」')
+  assert.ok(!String(primary.props.className).includes('dgs-collapse'),
+    '主操作不能被挂上收起类：CSS 收的是 .dgs-bar-rest 里的，但类名混进来迟早会出事')
+})
+
+/**
+ * CSS 与派生逻辑的名单必须一致 —— 这条是上一条的**另一半**。
+ *
+ * 上面验的是「派生出 collapsed 时要画副本」；这里验「CSS 收的那两个动词，正是
+ * BAR_COLLAPSED 里那两个」。两边一旦分家（比如往 CSS 里加一个 `.dgs-collapse`，
+ * 或改动 BAR_COLLAPSED），就会出现「CSS 收了、派生不知道」→ 窄栏下又没有入口。
+ *
+ * 纯源码断言（不需要浏览器）：container query 不参与假 React 的渲染，这一层只能
+ * 这样钉。真实可见性由 .ui-preview 的自查在真浏览器里量（README「版面实测」）。
+ */
+test('client standalone：窄栏收起名单与 CSS 规则同源（BAR_COLLAPSED 是唯一事实来源）', () => {
+  // ① 名字只在 BAR_COLLAPSED 里定义一次；actionButton / deriveActions / MoreActions
+  //    都读它，不再各写一份 'fetch' || 'safePull' 的判断。
+  assert.match(CLIENT_SOURCE, /const BAR_COLLAPSED = \['fetch', 'safePull'\]/,
+    'BAR_COLLAPSED 应显式列出窄栏收起的动词')
+  const inlineChecks = [...CLIENT_SOURCE.matchAll(/id === 'fetch' \|\| id === 'safePull'/g)]
+  assert.equal(inlineChecks.length, 0,
+    '不该再有内联的 fetch/safePull 判断：三处名单必须共读 BAR_COLLAPSED')
+
+  // ② 收起规则本身仍然存在，且只作用于次级组（`.dgs-bar-rest`）——
+  //    一旦写成不给前缀的 `.dgs-collapse{display:none}`，主操作也会被收走。
+  assert.match(CLIENT_SOURCE, /'\.dgs-bar-rest \.dgs-collapse\{display:none\}'/,
+    '窄栏收起规则必须限定在 .dgs-bar-rest 里（主操作不在其中，不能被收）')
+
+  // ③ 副本那条规则必须存在：宽栏隐藏、窄栏显示。
+  assert.match(CLIENT_SOURCE, /\.dgs-narrow-only\{display:none!important\}/,
+    '宽栏（min-width:560px）下副本要隐藏 —— 那时动作条上已经有一个了')
+  assert.match(CLIENT_SOURCE, /\.dgs-narrow-only\{display:flex\}/,
+    '窄栏下副本要显形（.dgs-narrow-only 的基础档就是这一条）')
+})
+
+/**
+ * 动作条那句「为什么推荐这个主操作」（why）必须**留在面板里**。
+ *
+ * 它一度被 `.dgs-bar-why{display:none}` 在 `@container (max-width:559px)` 下整句藏掉 ——
+ * 而 420px（右侧栏默认宽）恰好落在这个区间里。实测那一档恰恰在次要动作组与「更多」
+ * 之间**空出 178px**：一句话都没有，却空着能放两行的地方。
+ *
+ * 「一屏一个主操作」的前提是面板替用户做了选择；那么它就有义务说清为什么。
+ * 现在它在所有宽度都渲染：宽处整句、窄处省略号、完整句子始终在 title 里。
+ */
+test('client standalone：动作条始终说明「为什么推荐这个主操作」（不因窄栏而整句消失）', async () => {
+  const harness = makeFakeWindow({
+    stateResponse: {
+      ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: 'origin/main',
+      ahead: 1, behind: 0,
+      changes: [{ code: ' M', path: 'a.txt', staged: false }], changesTotal: 1,
+      log: [], remotes: [],
+    },
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const tree = await react.settle()
+
+  const why = findByClass(tree, 'dgs-bar-why')
+  assert.ok(why !== undefined, '动作条里必须画着那句说明')
+  // 它不是装饰：要有内容，且内容就是派生出来的理由（可悬停读的完整那句）。
+  assert.ok(textOf(why).trim().length > 0, 'why 不能是空的')
+  assert.ok(String(why.props.title).length > 0,
+    'why 的 title 要留着完整那一句（窄栏截断时靠悬停读全）')
+  assert.equal(textOf(why).trim(), String(why.props.title).trim(),
+    'why 的可见文本与 title 一致：短句时整句可见')
+
+  // 位置：它排在「更多」之前 —— 它要吃的就是次要动作组与「更多」之间的剩余空间。
+  const bar = findByClass(tree, 'dgs-bar')
+  const kids = Array.isArray(bar.children) ? bar.children : [bar.children]
+  const whyAt = kids.findIndex((child) => child !== null && typeof child === 'object'
+    && typeof child.props === 'object' && child.props.className === 'dgs-bar-why')
+  const moreAt = kids.findIndex((child) => child !== null && typeof child === 'object'
+    && child.type === 'button' && String(child.props.className).includes('dgs-more'))
+  assert.ok(whyAt !== -1 && moreAt !== -1, '动作条里应有 why 与「更多」两个直接子元素')
+  assert.ok(whyAt < moreAt, 'why 要排在「更多」之前（否则它吃不到那段空白）')
+})
+
+/**
+ * 表面切换器是一副**真正的 tablist**，而不是「四个长得像 tab 的按钮」。
+ *
+ * 它原先只声明了 `role="tab"` / `aria-selected`：没有 `aria-controls`、没有对应
+ * 面板的 `role="tabpanel"`、四档在 Tab 键序列里各占一次停顿、方向键完全不响应。
+ * 对一个「一屏只画一件事」的面板来说，那一排就是主导航，键盘用户只能一档一档
+ * Tab 过去，且读屏读不出当前那块内容属于哪一档。
+ *
+ * 钉住两侧的配对：`aria-controls` ↔ 面板 `id`，面板 `aria-labelledby` ↔ tab `id`。
+ */
+test('client standalone：表面切换器是真 tablist（aria 配对 + roving tabindex + 方向键换屏）', async () => {
+  const harness = makeFakeWindow({ stateResponse: REPO_WITH_CHANGES })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const tree = await react.settle()
+
+  const tablist = findByClass(tree, 'dgs-tabs')
+  assert.ok(tablist !== undefined, '要有表面切换器')
+  assert.equal(tablist.props.role, 'tablist', '切换器要声明 role=tablist')
+  assert.equal(tablist.props['aria-orientation'], 'horizontal', '横向一排要写出方向')
+
+  // 面板的假 React 不像真实 React 那样扁平化数组子元素，而 SurfaceTabs 是把整排
+  // tabs 作为一个数组子元素传进去的 —— 所以这里走 flattenTree（它递归展开嵌套数组，
+  // 出来的顺序就是真实 DOM 顺序；后面「why 要排在更多之前」那处也依赖这个顺序）。
+  const tabs = (bar) => flattenTree(bar).filter((node) =>
+    node !== null && typeof node === 'object' && node.props !== undefined && node.props.role === 'tab')
+
+  // ① 四档都是 tab，且 id / aria-controls 齐全。
+  const allTabs = tabs(tablist)
+  assert.equal(allTabs.length, 4, '应有 4 个表面档，实际 ' + allTabs.length)
+  for (const tab of allTabs) {
+    assert.ok(typeof tab.props.id === 'string' && tab.props.id.length > 0, '每个 tab 要有 id（供 labelledby 回指）')
+    assert.ok(typeof tab.props['aria-controls'] === 'string' && tab.props['aria-controls'].length > 0,
+      '每个 tab 要有 aria-controls（否则读屏说不出它控制哪块）')
+    assert.ok(tab.props['aria-controls'] !== tab.props.id, 'aria-controls 与 id 不能相同')
+  }
+
+  // ② roving tabindex：整排只占一次 Tab 停顿（当前档 0，其余 -1）。
+  const zero = allTabs.filter((tab) => tab.props.tabIndex === 0)
+  const minus = allTabs.filter((tab) => tab.props.tabIndex === -1)
+  assert.equal(zero.length, 1, '只能有一档 tabIndex=0（roving），实际 ' + zero.length)
+  assert.equal(minus.length, 3, '其余三档应是 tabIndex=-1')
+  assert.equal(zero[0].props['aria-selected'], true, 'tabIndex=0 的那一档必须就是当前档')
+
+  // ③ 当前表面是配好对的 tabpanel。
+  const panel = findByClass(tree, 'dgs-surface')
+  assert.equal(panel.props.role, 'tabpanel', '表面正文要声明 role=tabpanel')
+  assert.equal(panel.props.id, zero[0].props['aria-controls'],
+    '面板 id 必须等于当前档的 aria-controls')
+  assert.equal(panel.props['aria-labelledby'], zero[0].props.id,
+    '面板 aria-labelledby 必须回指当前档的 id')
+
+  // ④ 方向键换屏：→ 下一档，← 上一档，Home/End 到头。
+  const current = zero[0]
+  assert.equal(typeof current.props.onKeyDown, 'function', 'tab 要响应方向键')
+  const key = (tab, name) => {
+    let prevented = false
+    tab.props.onKeyDown({
+      key: name,
+      currentTarget: { parentElement: null },
+      preventDefault: () => { prevented = true },
+    })
+    return prevented
+  }
+  assert.equal(key(current, 'ArrowRight'), true, '→ 应被消费（切档并阻止翻页）')
+  const afterRight = await react.settle()
+  const rightTab = tabs(findByClass(afterRight, 'dgs-tabs'))
+    .find((node) => node.props['aria-selected'] === true)
+  assert.ok(textOf(rightTab).startsWith('历史'), '→ 之后当前档应是「历史」，实际 ' + textOf(rightTab))
+
+  // 再按 → 应回到「改动」之外的第一档之后（设置 → 改动会绕回，从设置按 ← 到分支）。
+  const leftTab = tabs(findByClass(afterRight, 'dgs-tabs'))
+    .find((node) => node.props['aria-selected'] === true)
+  assert.equal(key(leftTab, 'ArrowLeft'), true, '← 应被消费')
+  const afterLeft = await react.settle()
+  const backTab = tabs(findByClass(afterLeft, 'dgs-tabs'))
+    .find((node) => node.props['aria-selected'] === true)
+  assert.ok(textOf(backTab).startsWith('改动'), '← 一次应回到「改动」，实际 ' + textOf(backTab))
+
+  // 端点用 Home / End，不靠方向键绕圈。
+  const homeTab = tabs(findByClass(afterLeft, 'dgs-tabs'))
+    .find((node) => node.props['aria-selected'] === true)
+  assert.equal(key(homeTab, 'End'), true, 'End 应被消费')
+  const afterEnd = await react.settle()
+  const endTab = tabs(findByClass(afterEnd, 'dgs-tabs'))
+    .find((node) => node.props['aria-selected'] === true)
+  assert.ok(textOf(endTab).startsWith('设置'), 'End 应跳到最后一档「设置」，实际 ' + textOf(endTab))
+})
+
 /** 按 className 找一个元素：className 可能是 'a b' 形态，按词匹配。 */
 function findByClass(tree, className) {
   return flattenTree(tree).find((node) =>
@@ -4319,6 +4617,59 @@ test('client standalone：「拉取自」下拉列出跟随上游 + 每个远程
   const pulls = opPayloads(harness).filter((payload) => payload.op === 'pull')
   assert.equal(pulls.length, 1, '应 POST 一次 pull：' + JSON.stringify(opPayloads(harness)))
   assert.equal(pulls[0].remote, 'origin', '拉的必须是被选中的那个远程')
+})
+
+test('client standalone：「拉取自」与「推送到」两个下拉恒等宽（选项文案长度不同也不分家）', async () => {
+  // 回归：这两个 `<select>` 原先都只给了 `maxWidth`，没有 `width` —— 而 `<select>`
+  // 的固有宽度取自**最宽的那一项**。两边的选项文案不一样长（「从 origin 拉」10 字
+  // vs「推送到 origin」12 字；远端默认分支不同名时拉取侧还会多出更长的
+  // 「从 origin/master 拉（上次选的）」），于是同一组控件排出 101px / 110px 两个宽度
+  // （实测 `.ui-preview` audit.js 的 PICK SELECTS）。一排同权控件宽度不同，肉眼只会
+  // 读成「这两个不是一回事」，而它们恰恰是完全对称的同一个控件。
+  //
+  // 断言盯的是**定宽**（width）本身，而不是某个具体像素：宽度必须与选项文案解耦，
+  // 否则下回再改文案又会分家。窄栏下限（minWidth）同时钉住 —— 那是防止下拉被压成
+  // 只有一个箭头的旧修复，不能因为改宽度被弄丢。
+  const harness = makeFakeWindow({ stateResponse: TWO_REMOTES })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const tree = await react.settle()
+
+  const pull = findPullTargetSelect(tree)
+  const push = findPushTargetSelect(tree)
+  assert.ok(pull !== undefined && push !== undefined, '两个来源下拉都要在')
+
+  for (const [label, node] of [['拉取自', pull], ['推送到', push]]) {
+    const style = node.props.style
+    assert.equal(typeof style.width, 'string', label + '下拉必须有定宽：' + JSON.stringify(style))
+    assert.equal(style.width, pull.props.style.width,
+      label + '与另一个来源下拉必须恒等宽（不能由选项文案长度决定）')
+    assert.equal(style.minWidth, '84px',
+      label + '下拉要保留 84px 下限（窄栏下不能被压成一个箭头）：' + JSON.stringify(style.minWidth))
+    assert.equal(style.flex, '0 1 auto',
+      label + '下拉仍要可收缩（窄栏下说明文字整段换行，而不是把它顶出面板）')
+  }
+
+  // 换一个远端默认分支与当前分支**不同名**的现场：拉取侧多出最长的那一项。
+  // 定宽下两侧仍相等 —— 这正是旧实现开始分家的那一场。
+  const forked = makeFakeWindow({
+    stateResponse: {
+      ...TWO_REMOTES,
+      remoteHeads: { origin: 'master', fork: 'fork-local.2' },
+    },
+  })
+  const forkedReact = makeStatefulReact()
+  mountPanel(evaluateBundle(forked, forkedReact.api).exports, forkedReact, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const forkedTree = await forkedReact.settle()
+  const widePull = findPullTargetSelect(forkedTree)
+  const labels = (widePull.children ?? [])
+    .filter((child) => child !== null && typeof child === 'object' && child.type === 'option')
+    .map((item) => String(textOf(item)))
+  assert.ok(labels.some((text) => text.includes('从 origin/master 拉')),
+    '远端默认分支不同名时拉取侧确实多出长文案那一项，实际：' + JSON.stringify(labels))
+  assert.equal(widePull.props.style.width, findPushTargetSelect(forkedTree).props.style.width,
+    '拉取侧多出长文案那一项之后，两个下拉仍然恒等宽')
 })
 
 test('client standalone：「安全拉取」与「拉取」同一个来源（同一份选择、同一份变基）', async () => {
