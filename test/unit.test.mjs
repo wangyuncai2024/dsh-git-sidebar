@@ -58,6 +58,7 @@ import {
   pullFromNote,
   pullChoices,
   pullFromDefaultChoice,
+  divergedChoice,
   pushTargetNote,
   currentBranchName,
   branchNameRemoteConflict,
@@ -1335,6 +1336,83 @@ test('pullChoices：无关历史 / 冲突 / 「远端没有这条分支」三条
   assert.equal(pullChoices({ reason: 'remote-branch-missing', pullFromDefault: null }), null)
   assert.equal(pullChoices({ reason: 'auth-http' }), null)
   assert.equal(pullChoices(null), null)
+})
+
+// ── 「历史分叉了」：CI 上把三条好用例逼红的那条报错 ────────────────────────
+//
+// 现场（原样取自 GitHub Actions 的日志）：本地推过自己的提交、上游又来了新的，
+// `git pull` 在 git 2.27+ 不再替用户选合并还是变基，直接拒绝。
+// 此前它落进 none，面板只能把这段英文 hint（里面还写着 `git config pull.rebase false`）
+// 原样甩给用户 —— 既没有中文下一步，又看起来像在劝人改全局配置。
+
+// 两种文案都要认：没配 pull.ff 时是前面那句，配了 pull.ff=only 时是后面那句。
+const DIVERGED_TEXTS = [
+  'hint: You have divergent branches and need to specify how to reconcile them.\n'
+    + 'hint:   git config pull.rebase false  # merge\n'
+    + 'fatal: Need to specify how to reconcile divergent branches.',
+  "hint: Diverging branches can't be fast-forwarded, you need to either:\n"
+    + 'fatal: Not possible to fast-forward, aborting.',
+]
+
+for (const [index, text] of DIVERGED_TEXTS.entries()) {
+  test(`classifyPullFailure（分叉）第 ${index + 1} 种文案 → diverged`, () => {
+    assert.equal(classifyPullFailure(text), 'diverged')
+    // 两个流上都要认（pull 的报错分散在 stderr / stdout）。
+    assert.equal(classifyPullFailure(''), 'none', '空文本仍要落 none')
+  })
+}
+
+test('pullHint：分叉要给中文下一步，且必须说清「不改你的 git 配置」', () => {
+  const hint = String(pullHint('diverged'))
+  assert.match(hint, /分叉/, '要讲清是历史分叉，不是故障')
+  // git 自己那段 hint 建议的是全局改配置，而本插件的原则是一个字节都不动。
+  assert.match(hint, /不会改|不改/, '要明确否认「去改配置」这条看似顺理成章的路')
+  assert.doesNotMatch(hint, /git config/, '不能把用户引去改 git 配置')
+})
+
+test('argvPull：noRebase 走 --no-rebase，且选项必须排在位置参数之前', () => {
+  assert.deepEqual(argvPull({ noRebase: true }), ['pull', '--no-rebase'])
+  assert.deepEqual(argvPull({ noRebase: true, remote: 'origin', branch: 'main' }),
+    ['pull', '--no-rebase', 'origin', 'main'], '选项要在位置参数之前')
+  // 没给就是老行为（既有用例已钉住），这里确认 noRebase 不会被误当成 rebase。
+  assert.deepEqual(argvPull({}), ['pull'])
+  // 两个同时为真：以**显式勾选的「变基」**为准（它是用户在面板上的意图）。
+  assert.deepEqual(argvPull({ rebase: true, noRebase: true }), ['pull', '--rebase'])
+})
+
+test('divergedChoice：按钮带 noRebase，且参数里只放这次真正拉的目标', () => {
+  const bare = divergedChoice(null)
+  assert.equal(bare.op, 'pull')
+  assert.deepEqual(bare.params, { noRebase: true }, '裸 pull 不该凭空补一个远程名')
+  assert.equal(bare.confirm, null, '合并不是破坏性动作，不必每点一次都弹确认')
+
+  const named = divergedChoice({ remote: 'origin', branch: 'main' })
+  assert.deepEqual(named.params, { noRebase: true, remote: 'origin', branch: 'main' })
+  assert.match(named.label, /--no-rebase/, '按钮上就要写明会执行什么命令')
+  assert.match(named.detail, /origin\/main/, '要说清这次从哪儿拉')
+  // 两个方向都要提到：不想合并的人该去哪儿（变基是面板已有的勾选，不另造一条路）。
+  assert.match(named.detail, /变基/, '要指出「想变基」走哪儿，否则用户会以为没得选')
+  // 只给了远程、没点名分支时也不能凭空造分支名。
+  assert.deepEqual(divergedChoice({ remote: 'upstream' }).params, { noRebase: true, remote: 'upstream' })
+})
+
+test('pullChoices：分叉给一条「用合并拉这一次」，裸 pull 时也照给', () => {
+  const withTarget = pullChoices({ reason: 'diverged', remote: 'origin', branch: 'main' })
+  assert.equal(withTarget.length, 1, '只给一条路：变基已有入口，不在这里分叉')
+  assert.deepEqual(withTarget[0], divergedChoice({ remote: 'origin', branch: 'main' }),
+    'pullChoices 里那条路必须就是 divergedChoice 造的（文案不会各写一套）')
+  // 裸 pull 撞上分叉时同样要给：那时 target 读不出来，按钮只能走裸 pull --no-rebase，
+  // 否则用户看到提示写着「在下面选一个」而下面什么都没有。
+  const bare = pullChoices({ reason: 'diverged' })
+  assert.equal(bare.length, 1)
+  assert.deepEqual(bare[0].params, { noRebase: true })
+})
+
+test('buildOpArgv：面板那条按钮的参数真的会变成 --no-rebase', async () => {
+  assert.deepEqual(
+    await buildOpArgv('pull', { noRebase: true, remote: 'origin', branch: 'main' }, process.cwd()),
+    ['pull', '--no-rebase', 'origin', 'main'],
+  )
 })
 
 test('classifyPushFailure：没有写权限要单独成一类（本次现场：origin 只读）', () => {

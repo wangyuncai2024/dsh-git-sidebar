@@ -686,7 +686,12 @@ test(
       const mirrored = calls.filter((line) => line.includes('insteadOf'))
       assert.equal(mirrored.length, 1, '镜像只该试一次，实际：' + JSON.stringify(calls))
       assert.match(mirrored[0], /fetch --all --prune/, '镜像那次跑的应该就是原命令')
-      const direct = calls.filter((line) => line.startsWith('fetch --all --prune'))
+      // 不能断言 `startsWith('fetch --all --prune')`：假 git 记的是**完整 argv**，
+      // 而真正的命令前面永远挂着卫生参数（`--no-pager -c color.ui=false …`，
+      // 见 lib/git.js 的 OUTPUT_HYGIENE_ARGS）。CI 上这条一直红，本地却因为假 git
+      // 是 POSIX 脚本被跳过而看不见。判据要落在「同一条子命令」上：不带 insteadOf
+      // 且含 `fetch --all --prune` —— 这才区分得开镜像那次和回退那次。
+      const direct = calls.filter((line) => !line.includes('insteadOf') && line.includes('fetch --all --prune'))
       assert.equal(direct.length, 1, '回退必须真的再跑一次不带镜像的原命令，实际：' + JSON.stringify(calls))
 
       // 3) 用户要能看见这件事，而不是被蒙在鼓里。

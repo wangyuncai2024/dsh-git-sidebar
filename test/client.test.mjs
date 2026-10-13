@@ -4802,6 +4802,60 @@ test('client standalone：宿主给出「改从默认分支拉取」那条路时
   assert.equal(pulls[1].branch, 'master', '点了按钮就要带着那只默认分支去拉')
 })
 
+test('client standalone：历史分叉时把「用合并拉这一次」渲染成按钮，点了要真的带上 noRebase', async () => {
+  // CI 上把三条真 git 用例逼红的那条报错，在面板上的样子：git 拒绝自己选合并还是变基。
+  // 按钮必须把 noRebase 一路送到宿主 —— 少传这个字段，按钮点了会**再失败一次**
+  // （同样的 fatal），用户看到的是「点了没反应」。
+  const harness = makeFakeWindow({
+    stateResponse: TWO_REMOTES,
+    opResponses: {
+      pull: {
+        ok: false, op: 'pull', exitCode: 128, stdout: '',
+        stderr: 'hint: You have divergent branches and need to specify how to reconcile them.\n'
+          + 'fatal: Need to specify how to reconcile divergent branches.',
+        message: 'fatal: Need to specify how to reconcile divergent branches.',
+        reason: 'diverged',
+        hint: '本地和远端各有各的新提交（历史分叉了）……在下面选一个结果就行，不用敲命令。',
+        choices: [{
+          id: 'pull-merge',
+          label: '用合并的方式拉这一次（git pull --no-rebase）',
+          detail: '按合并的方式拉这一次：来源是 origin/main……',
+          op: 'pull',
+          params: { noRebase: true, remote: 'origin', branch: 'main' },
+        }],
+        state: TWO_REMOTES,
+      },
+    },
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const tree = await react.settle()
+
+  findPullTargetSelect(tree).props.onChange({ target: { value: 'origin' } })
+  const picked = await react.settle()
+  await findButton(picked, '拉取').props.onClick()
+  const after = await react.settle()
+
+  // 提示要说清这不是故障、并且不会改用户的 git 配置（否则用户会照 git 的英文 hint
+  // 去 `git config pull.rebase false` —— 那正是本插件一直在避免的事）。
+  assert.ok(textOf(after).includes('分叉'), '提示要讲清是历史分叉：' + textOf(after).slice(0, 400))
+
+  // findButton 是**全等**匹配，而这条按钮的文案带命令后缀，所以按前缀找。
+  const button = flattenTree(after).find((node) =>
+    node !== null && typeof node === 'object' && node.type === 'button'
+    && textOf(node).startsWith('用合并的方式拉这一次'))
+  assert.ok(button !== undefined, '宿主给的路要渲染成可点的按钮：' + textOf(after).slice(0, 400))
+  await button.props.onClick()
+  await react.settle()
+
+  const pulls = opPayloads(harness).filter((payload) => payload.op === 'pull')
+  assert.equal(pulls.length, 2, '应再 POST 一次 pull')
+  assert.equal(pulls[1].noRebase, true, 'noRebase 必须一路送到宿主，否则点了会再失败一次')
+  assert.equal(pulls[1].remote, 'origin', '这次真正拉的那个远程要原样带上')
+  assert.equal(pulls[1].branch, 'main')
+})
+
 // ── fork 现场：远端默认分支与当前分支不同名 → 一键「把上游拉到当前分支」 ────────
 //
 // 真实仓库（dsh-skills-manager）：当前分支 `local.2` 跟踪 `fork/local.2`（自己的），

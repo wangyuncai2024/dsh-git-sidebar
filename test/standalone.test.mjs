@@ -16,7 +16,7 @@
 
 import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -27,9 +27,23 @@ import { join } from 'node:path'
 // stashSwitch 这 4 条在干净代码上也永远红着（实测过），真回归反而被埋在噪音里。
 // 用 GIT_CONFIG_* 环境变量只影响本进程拉起的 git，**不改用户任何 git 配置**
 // （这也正是插件自己的原则：git -c / 环境变量只作用于单次调用）。
-process.env.GIT_CONFIG_COUNT = '1'
+//
+// 第二项 `pull.rebase=false` 是**同一个理由的第二个实例**：几条「拉取自」
+// （pull --from）用例的现场就是**历史已经分叉**（本地推过自己的提交、上游又来了新的），
+// 而 git 2.27+ 对这种 `git pull` 会直接拒绝：
+//   fatal: Need to specify how to reconcile divergent branches.
+// 它要求 pull.rebase / pull.ff 里至少配一个。开发机上常常**恰好**配了
+// `pull.rebase=false`（于是本地全绿），CI runner 上是干净的、一个都没配
+// —— 同一份代码在两边结论相反，红的却是三条好用例。
+// 用例要验的是「把上游那份合进来，且不动上游配置」，那就得先把「怎么合」钉死，
+// 不能让结论取决于跑测试的那台机器的全局配置。钉成 false（merge）而不是 true，
+// 是因为用例随后会断言「这次真的产生了合并提交」，且面板的「变基」是**显式勾选**
+// 才走 --rebase（见 lib/ops.js argvPull）：不勾就是合并。
+process.env.GIT_CONFIG_COUNT = '2'
 process.env.GIT_CONFIG_KEY_0 = 'core.autocrlf'
 process.env.GIT_CONFIG_VALUE_0 = 'false'
+process.env.GIT_CONFIG_KEY_1 = 'pull.rebase'
+process.env.GIT_CONFIG_VALUE_1 = 'false'
 
 // 日志默认落在插件仓库根目录；测试期间把它钉到临时目录，别让「跑一次测试」在仓库根
 // 留下 git-sidebar.log（默认路径由 lib/log.js 从 import.meta.url 推导，与 cwd 无关）。
@@ -1221,10 +1235,17 @@ test('standalone：服务器说「没有写权限」时给出「推送到别的�
     await run('git', ['init', '-q', '--bare', forkBare])
     // 用一个 pre-receive 钩子复刻 GitHub 的原话（本机没有网络，但这句 stderr 的形状
     // 与真 GitHub 一致 —— 分类与提示盯的就是它）。git 会自己加上 "remote: " 前缀。
-    await writeFile(join(originBare, 'hooks', 'pre-receive'),
+    //
+    // **必须 chmod 成可执行**：git 只在钩子「存在且可执行」时才运行它（文档里的
+    // "the hook must be executable"）。writeFile 建出来的是 0644，于是 Linux（CI）
+    // 上钩子被静默忽略、推送反而成功，用例在「被拒绝」这一行就红了；
+    // 而 Windows 开发机不看这个位，本地照样绿 —— 正是这类「只在 CI 上红」的差异。
+    const deniedHook = join(originBare, 'hooks', 'pre-receive')
+    await writeFile(deniedHook,
       '#!/bin/sh\n'
       + 'echo "Permission to MichengAI/demo.git denied to wangyuncai2024." >&2\n'
       + 'exit 1\n')
+    await chmod(deniedHook, 0o755)
     await run('git', ['-C', root, 'config', 'user.email', 't@t'])
     await run('git', ['-C', root, 'config', 'user.name', 't'])
     await writeFile(join(root, 'f.txt'), '第一版\n')
@@ -1350,11 +1371,15 @@ test('standalone：分支受保护不是「你没有写权限」—— 诊断要
     await run('git', ['init', '-q', '--bare', originBare])
     await run('git', ['init', '-q', '--bare', forkBare])
     // 复刻 GitHub 受保护分支的原话：账号**有**写权限，只是这条引用不许直接更新。
-    await writeFile(join(originBare, 'hooks', 'pre-receive'),
+    // 同样必须 chmod 成可执行，否则 Linux（CI）上 git 会静默跳过这个钩子
+    // —— 见上一条用例里的同一处说明。
+    const protectedHook = join(originBare, 'hooks', 'pre-receive')
+    await writeFile(protectedHook,
       '#!/bin/sh\n'
       + 'echo "error: GH006: Protected branch update failed for refs/heads/main." >&2\n'
       + 'echo "error: Changes must be made through a pull request." >&2\n'
       + 'exit 1\n')
+    await chmod(protectedHook, 0o755)
     await run('git', ['-C', root, 'config', 'user.email', 't@t'])
     await run('git', ['-C', root, 'config', 'user.name', 't'])
     await writeFile(join(root, 'f.txt'), '第一版\n')
