@@ -3376,21 +3376,23 @@ test('client standalone：动作条的主操作由状态推导（一屏一个主
 })
 
 /**
- * 窄栏下被 CSS 收走的动词，必须在「更多」里留一份能点的副本。
+ * 窄栏下被 CSS 收走的动词，必须在「更多」里留一份能点的副本 —— 而且**档位要对**。
  *
  * 回归的是「注释说收进「更多」，而「更多」里根本没有」这一类 bug：PANEL_CSS 用
- * `.dgs-bar-rest .dgs-collapse{display:none}` 把「获取远程 / 安全拉取」在 < 560px
- * 藏掉，而 MoreActions 只画 unstageAll / discard / stash / 变基 —— 于是这两个动词
- * 在整个面板里**一个入口都不剩**。实测 300px 与 420px（右侧栏默认宽）两档复现：
- * 「获取远程」既不在动作条上、也不在「更多」里。
+ * `.dgs-bar-rest .dgs-collapse-*{display:none}` 把动词在窄栏藏掉，而 MoreActions 只画
+ * unstageAll / discard / stash / 变基 —— 于是被收的动词在整个面板里**一个入口都不剩**。
+ * 实测 300px 与 420px（右侧栏默认宽）两档复现：「获取远程」既不在动作条上、也不在「更多」里。
  *
- * 这条用例钉住三件事：
- *   ① 被收的动词在「更多」里有副本，且副本挂 `.dgs-narrow-only`（宽栏隐藏）；
- *   ② 副本**不挂** `.dgs-collapse`（挂上就等于把同一把刀递给将来那条规则）；
- *   ③ 主操作不进副本：干净工作区下「获取远程」正是主操作，它不在 `.dgs-bar-rest`
+ * 这条用例钉住四件事：
+ *   ① 两档收掉的动词在「更多」里都有副本；
+ *   ② 副本的类名**跟着档位走**（narrow → `.dgs-narrow-only`，tight → `.dgs-tight-only`）——
+ *      这条是本次改造的核心：`获取远程` 在 380–559px 之间是**留在动作条里**的，它的副本
+ *      如果还挂 `.dgs-narrow-only`，那一整段宽度里同一个动词就有两个可见入口；
+ *   ③ 副本**不挂**收起类（挂上就等于把同一把刀递给将来那条规则）；
+ *   ④ 主操作不进副本：干净工作区下「获取远程」正是主操作，它不在 `.dgs-bar-rest`
  *      里、CSS 收不到它 —— 此时再补一份副本会让同一个动词出现两个入口。
  */
-test('client standalone：窄栏收起的同步动词在「更多」里有副本（收掉 ≠ 消失）', async () => {
+test('client standalone：窄栏收起的同步动词在「更多」里有副本，且副本跟着档位走', async () => {
   const mount = async (state) => {
     const harness = makeFakeWindow({ stateResponse: state })
     const react = makeStatefulReact()
@@ -3411,22 +3413,25 @@ test('client standalone：窄栏收起的同步动词在「更多」里有副本
   }
 
   // ① 脏工作区：次级组是「拉取 / 推送 / 获取远程 / 安全拉取」，
-  //    窄栏收掉后两个 —— 两个都必须在「更多」里补上。
+  //    narrow 档收「安全拉取」、tight 档收「获取远程」—— 两个都要在「更多」里补上。
   const dirtyMount = await mount(Object.assign({}, base, {
     changes: [{ code: ' M', path: 'a.txt', staged: false }], changesTotal: 1,
   }))
   await findButton(dirtyMount.tree, '更多 ▸').props.onClick()
   const dirtyMore = await dirtyMount.react.settle()
-  for (const label of ['获取远程', '安全拉取']) {
+  // ② 档位 → 副本类名。`获取远程` 的那份是 `.dgs-tight-only`：它在 380–559px
+  //    之间**不**该显形，因为那一档动作条上就有一个。
+  const expectedCopyClass = { '安全拉取': 'dgs-narrow-only', '获取远程': 'dgs-tight-only' }
+  for (const label of ['安全拉取', '获取远程']) {
     const copy = moreButtons(dirtyMore).find((node) => textOf(node) === label)
     assert.ok(copy !== undefined,
-      '窄栏会收掉「' + label + '」，它必须在「更多」里有一份副本（否则窄栏下完全不可达）')
-    // ② 副本必须是「窄栏可见、宽栏隐藏」，且不被收起规则命中。
+      '窄栏会收掉「' + label + '」，它必须在「更多」里有一份副本（否则那一档下完全不可达）')
     const classes = String(copy.props.className).split(' ')
-    assert.ok(classes.includes('dgs-narrow-only'),
-      '副本要挂 .dgs-narrow-only（宽栏隐藏：那时动作条上已经有一个了）')
-    assert.ok(!classes.includes('dgs-collapse'),
-      '副本不能挂 .dgs-collapse —— 它的存在意义就是「不被窄栏规则收走」')
+    assert.ok(classes.includes(expectedCopyClass[label]),
+      '「' + label + '」的副本要挂 .' + expectedCopyClass[label]
+      + '（档位错了就会要么没有入口、要么同一个动词两个入口）')
+    assert.ok(!classes.some((name) => name.startsWith('dgs-collapse')),
+      '副本不能挂收起类 —— 它的存在意义就是「不被收起规则收走」')
   }
   // 副本点下去要真的执行同一个动作（不是个装饰按钮）。
   const fetchCopy = moreButtons(dirtyMore).find((node) => textOf(node) === '获取远程')
@@ -3434,7 +3439,7 @@ test('client standalone：窄栏收起的同步动词在「更多」里有副本
   assert.equal(String(fetchCopy.props.title).includes('fetch --all --prune'), true,
     '副本的 tooltip 要与动作条上那份一致（同一个动词不能两套说明）')
 
-  // ③ 干净工作区：「获取远程」是**主操作**（不在 .dgs-bar-rest 里，CSS 收不到它），
+  // ④ 干净工作区：「获取远程」是**主操作**（不在 .dgs-bar-rest 里，CSS 收不到它），
   //    此时不该有任何副本 —— 否则同一个动词有两个入口。
   const cleanMount = await mount(base)
   await findButton(cleanMount.tree, '更多 ▸').props.onClick()
@@ -3453,32 +3458,50 @@ test('client standalone：窄栏收起的同步动词在「更多」里有副本
 /**
  * CSS 与派生逻辑的名单必须一致 —— 这条是上一条的**另一半**。
  *
- * 上面验的是「派生出 collapsed 时要画副本」；这里验「CSS 收的那两个动词，正是
- * BAR_COLLAPSED 里那两个」。两边一旦分家（比如往 CSS 里加一个 `.dgs-collapse`，
- * 或改动 BAR_COLLAPSED），就会出现「CSS 收了、派生不知道」→ 窄栏下又没有入口。
+ * 上面验的是「派生出 collapsed 时要画副本」；这里验「CSS 收的动词，正是
+ * BAR_COLLAPSE_TIER 里那些」。两边一旦分家（比如往 CSS 里加一个 `.dgs-collapse-tight`，
+ * 或改动名单），就会出现「CSS 收了、派生不知道」→ 那一档下又没有入口。
  *
  * 纯源码断言（不需要浏览器）：container query 不参与假 React 的渲染，这一层只能
  * 这样钉。真实可见性由 .ui-preview 的自查在真浏览器里量（README「版面实测」）。
  */
-test('client standalone：窄栏收起名单与 CSS 规则同源（BAR_COLLAPSED 是唯一事实来源）', () => {
-  // ① 名字只在 BAR_COLLAPSED 里定义一次；actionButton / deriveActions / MoreActions
-  //    都读它，不再各写一份 'fetch' || 'safePull' 的判断。
-  assert.match(CLIENT_SOURCE, /const BAR_COLLAPSED = \['fetch', 'safePull'\]/,
-    'BAR_COLLAPSED 应显式列出窄栏收起的动词')
+test('client standalone：窄栏收起名单与 CSS 规则同源（BAR_COLLAPSE_TIER 是唯一事实来源）', () => {
+  // ① 名字只在 BAR_COLLAPSE_TIER 里定义一次；actionButton / MoreActions 都读它，
+  //    不再各写一份 'fetch' || 'safePull' 的判断。
+  assert.match(CLIENT_SOURCE, /const BAR_COLLAPSE_TIER = \{\s*narrow: \['safePull'\],\s*tight: \['fetch'\],\s*\}/,
+    'BAR_COLLAPSE_TIER 应按档位显式列出让位的动词')
   const inlineChecks = [...CLIENT_SOURCE.matchAll(/id === 'fetch' \|\| id === 'safePull'/g)]
   assert.equal(inlineChecks.length, 0,
-    '不该再有内联的 fetch/safePull 判断：三处名单必须共读 BAR_COLLAPSED')
+    '不该再有内联的 fetch/safePull 判断：两处名单必须共读 BAR_COLLAPSE_TIER')
 
   // ② 收起规则本身仍然存在，且只作用于次级组（`.dgs-bar-rest`）——
-  //    一旦写成不给前缀的 `.dgs-collapse{display:none}`，主操作也会被收走。
-  assert.match(CLIENT_SOURCE, /'\.dgs-bar-rest \.dgs-collapse\{display:none\}'/,
-    '窄栏收起规则必须限定在 .dgs-bar-rest 里（主操作不在其中，不能被收）')
+  //    一旦写成不给前缀的 `.dgs-collapse-tight{display:none}`，主操作也会被收走。
+  assert.match(CLIENT_SOURCE, /'\.dgs-bar-rest \.dgs-collapse-narrow\{display:none\}'/,
+    'narrow 档收起规则必须限定在 .dgs-bar-rest 里（主操作不在其中，不能被收）')
+  assert.match(CLIENT_SOURCE, /'\.dgs-bar-rest \.dgs-collapse-tight\{display:none\}'/,
+    'tight 档收起规则同样要限定在 .dgs-bar-rest 里')
 
-  // ③ 副本那条规则必须存在：宽栏隐藏、窄栏显示。
+  // ③ 两条副本规则必须存在，且**方向相反**：narrow 副本宽栏隐藏、窄栏显形；
+  //    tight 副本默认隐藏、只在极窄档显形。写反任何一条都会让同一个动词
+  //    在某一整段宽度里有两个可见入口。
   assert.match(CLIENT_SOURCE, /\.dgs-narrow-only\{display:none!important\}/,
-    '宽栏（min-width:560px）下副本要隐藏 —— 那时动作条上已经有一个了')
+    '宽栏（min-width:560px）下 narrow 副本要隐藏 —— 那时动作条上已经有一个了')
   assert.match(CLIENT_SOURCE, /\.dgs-narrow-only\{display:flex\}/,
-    '窄栏下副本要显形（.dgs-narrow-only 的基础档就是这一条）')
+    'narrow 副本的基础档是显形（≤559px 都看得见）')
+  assert.match(CLIENT_SOURCE, /\.dgs-tight-only\{display:none\}/,
+    'tight 副本的基础档必须是隐藏 —— 它在 380–559px 之间不该显形（动作条上已有一个）')
+  assert.match(CLIENT_SOURCE, /\.dgs-tight-only\{display:flex!important\}/,
+    'tight 副本只在极窄档（≤379px）显形')
+
+  // ④ 两档的档位必须真有区别：如果 narrow 与 tight 收同样的动词，分级就白做了
+  //    （回到「420px 下为了半句说明把获取远程藏起来」那一版）。
+  const tiers = /const BAR_COLLAPSE_TIER = \{([\s\S]*?)\n    \}/.exec(CLIENT_SOURCE)
+  assert.ok(tiers !== null, '要能读到 BAR_COLLAPSE_TIER 的字面量')
+  const narrowList = /narrow: \[([^\]]*)\]/.exec(tiers[1])
+  const tightList = /tight: \[([^\]]*)\]/.exec(tiers[1])
+  assert.ok(narrowList !== null && tightList !== null, '两档都要显式列出动词')
+  assert.notEqual(narrowList[1].trim(), tightList[1].trim(),
+    '两档必须收不同的动词，否则分级没有意义')
 })
 
 /**
