@@ -734,8 +734,160 @@ test('standalone：stashPull —— 弹回改动时冲突：拉取完成、stash
   }
 })
 
-// ── 「安全切分支」（stashSwitch）：脏工作区也能切分支 ──────────────────────
+// ── 冲突分类：一边删了 vs 两边都改 ────────────────────────────────────────
 //
+// 现场来源（用户实际踩到的）：上游把某个文件整个删掉（归档提交），本地工作区里
+// 还改着这个文件 —— 点「安全拉取」后 stash pop 撞出 `DU 路径`。这类冲突的
+// 文件里**没有任何 <<<<<<< 标记**（git 把改过的那版整份留在工作区），面板原先
+// 一律让用户「打开文件删标记」，于是用户对着一个干净的文件找不到标记。
+// 下面的用例钉住「分类正确」与「这类冲突的提示不说删标记」。
+
+test('standalone：conflictKind —— DU/UD/DD 算「一边删了」，UU/AA 算「两边都改」', async () => {
+  const { conflictKind } = await import('../lib/index.js')
+  assert.equal(conflictKind('DU'), 'delete', 'DU = 我们删了他们改了')
+  assert.equal(conflictKind('UD'), 'delete', 'UD = 我们改了有人删了')
+  assert.equal(conflictKind('DD'), 'delete', 'DD = 两边都删了')
+  assert.equal(conflictKind('UU'), 'text', 'UU = 两边都改了')
+  assert.equal(conflictKind('AA'), 'text', 'AA = 两边都新增')
+  assert.equal(conflictKind(' M'), 'text', '普通修改不是 delete')
+  assert.equal(conflictKind('??'), 'text', '未跟踪不是 delete')
+})
+
+test('standalone：stashPull —— 一边删了/一边改了：提示不说「删标记」，说明留不留', async (context) => {
+  const { stashPull, runGit } = await import('../lib/index.js')
+  const fixture = await stashPullFixture(context, async (src, bare) => {
+    const { execFile } = await import('node:child_process')
+    const { promisify } = await import('node:util')
+    const run = promisify(execFile)
+    // 上游把 f.txt 整个删掉（这正是 dsh-workbuddy-connect 归档提交做的事）。
+    await run('git', ['-C', src, 'rm', '-q', 'f.txt'])
+    await run('git', ['-C', src, 'commit', '-qm', '上游删掉 f.txt'])
+    await run('git', ['-C', src, 'push', '-q', bare, 'main'])
+  })
+  if (fixture === null) return
+  const { root, work } = fixture
+  try {
+    // 本地还在改着这个文件 → stash pop 时撞出 modify/delete 冲突（DU）。
+    await writeFile(join(work, 'f.txt'), '本地改过的内容\n')
+    const payload = await stashPull({}, work, plainPullRunner(work))
+
+    assert.equal(payload.ok, false, '冲突需要用户处理，不能算成功')
+    assert.equal(payload.reason, 'stash-pop-conflict')
+
+    // 本用例要钉住的现场：文件留在工作区，但里面**一个标记都没有**。
+    const saved = await readFile(join(work, 'f.txt'), 'utf8')
+    assert.equal(saved.includes('<<<<<<<'), false,
+      '一边删了的冲突里不该有 <<<<<<< 标记（引导用户删标记会让他扑空）：' + saved)
+    assert.ok(saved.includes('本地改过的内容'), '被弹回来的那份改动应该整份留在工作区：' + saved)
+
+    const status = await runGit(['status', '--porcelain=v1'], work, { timeoutMs: 20000 })
+    assert.ok(status.stdout.includes('DU'), 'porcelain 里应该是 DU：' + status.stdout)
+
+    // 提示必须换一套说法：不能让人去找标记。
+    const said = [payload.message, payload.hint, ...(payload.notes ?? [])].filter(Boolean).join('\n')
+    assert.ok(said.includes('一边删了'), '提示要说清这是「一边删了」的冲突：' + said)
+    assert.equal(said.includes('把 <<<<<<< 到 >>>>>>> 之间的内容改成你要的样子'), false,
+      '一边删了的冲突不能套用「删标记」的指引：' + said)
+    assert.ok(said.includes('保留') && said.includes('删除'),
+      '提示要给出「留不留」两个方向：' + said)
+
+    const stash = await runGit(['stash', 'list'], work, { timeoutMs: 20000 })
+    assert.equal(stash.stdout.trim().length > 0, true, '弹回冲突时 stash 备份必须保留')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('standalone：conflictDetails —— 状态里带着分类，客户端据此分叉文案', async (context) => {
+  const { readState, stashPull } = await import('../lib/index.js')
+  const fixture = await stashPullFixture(context, async (src, bare) => {
+    const { execFile } = await import('node:child_process')
+    const { promisify } = await import('node:util')
+    const run = promisify(execFile)
+    await run('git', ['-C', src, 'rm', '-q', 'f.txt'])
+    await run('git', ['-C', src, 'commit', '-qm', '上游删掉 f.txt'])
+    await run('git', ['-C', src, 'push', '-q', bare, 'main'])
+  })
+  if (fixture === null) return
+  const { root, work } = fixture
+  try {
+    await writeFile(join(work, 'f.txt'), '本地改过的内容\n')
+    await stashPull({}, work, plainPullRunner(work))
+
+    const state = await readState(work)
+    assert.equal(Array.isArray(state.conflictDetails), true, 'state 必须回 conflictDetails（客户端靠它分叉）')
+    assert.equal(state.conflicts.length, 1, '应该正好一个冲突文件：' + JSON.stringify(state.conflicts))
+    const detail = state.conflictDetails[0]
+    assert.equal(detail.path, 'f.txt')
+    assert.equal(detail.code, 'DU')
+    assert.equal(detail.kind, 'delete', 'DU 的 kind 必须是 delete（客户端据此不给「删标记」指引）')
+    // 横幅上「保留文件内容」旁边要写清留下的是**谁的**版本：这三项由宿主算好，
+    // 客户端只负责显示（客户端 bundle 不 import 宿主模块，两边各写一遍迟早对不上）。
+    assert.equal(detail.canKeep, true, 'DU 时文件还在工作区里，「保留」是可行的')
+    assert.equal(typeof detail.keepSide, 'string')
+    assert.ok(detail.keepSide.includes('对方'), 'DU 的「保留」留下的是对方改过的那一版：' + detail.keepSide)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('standalone：keepSideText —— DU 留对方那版、UD 留自己那版、DD 没有可留的内容', async () => {
+  const { conflictKind, isBothDeleted, keepSideText } = await import('../lib/index.js')
+  // DD（两边都删）：工作区里根本没有这个文件，「保留」这条路不成立 —— 面板要据此
+  // 只画「接受删除」。对 DD 点 git add 只会得到 pathspec did not match。
+  assert.equal(isBothDeleted('DD'), true)
+  assert.equal(isBothDeleted('DU'), false)
+  assert.equal(isBothDeleted('UD'), false)
+  assert.equal(isBothDeleted('UU'), false)
+
+  // 这两种都归「删除类」（都没有标记），但「保留」留下的是相反的一边。
+  assert.equal(conflictKind('DU'), 'delete')
+  assert.equal(conflictKind('UD'), 'delete')
+  const du = keepSideText('DU')
+  const ud = keepSideText('UD')
+  assert.ok(du.includes('对方'), 'DU（我们删了、他们改了）→ 留下的是对方那版：' + du)
+  assert.ok(ud.includes('你'), 'UD（我们改了、有人删了）→ 留下的是你自己改的那版：' + ud)
+  assert.notEqual(du, ud, 'DU 与 UD 的「保留」结果相反，文案不能是同一句')
+  assert.ok(keepSideText('DD').includes('只能'), 'DD 要说清没有内容可留：' + keepSideText('DD'))
+})
+
+test('standalone：stashPull —— DU 冲突的提示写明「留下的是对方那一版」', async (context) => {
+  const { stashPull } = await import('../lib/index.js')
+  const fixture = await stashPullFixture(context, async (src, bare) => {
+    const { execFile } = await import('node:child_process')
+    const { promisify } = await import('node:util')
+    const run = promisify(execFile)
+    await run('git', ['-C', src, 'rm', '-q', 'f.txt'])
+    await run('git', ['-C', src, 'commit', '-qm', '上游删掉 f.txt'])
+    await run('git', ['-C', src, 'push', '-q', bare, 'main'])
+  })
+  if (fixture === null) return
+  const { root, work } = fixture
+  try {
+    await writeFile(join(work, 'f.txt'), '本地改过的内容\n')
+    const payload = await stashPull({}, work, plainPullRunner(work))
+    assert.equal(payload.reason, 'stash-pop-conflict')
+    const said = [payload.message, payload.hint, ...(payload.notes ?? [])].filter(Boolean).join('\n')
+    // 用户点「保留文件内容」之前最该知道的一句：留下的是对方那版，不是我的改动。
+    assert.ok(said.includes('对方'), '提示要写出「保留」留下的是对方那一版：' + said)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('standalone：冲突收尾的两条命令（保留内容 / 接受删除）都只是标记已解决', async () => {
+  const { OPS } = await import('../lib/index.js')
+  // 保留：git add —— 把工作区那一版收进索引，等于「这个文件留下」。
+  assert.deepEqual(OPS.resolveKeep.argv({ path: 'a.txt' }), ['add', '--', 'a.txt'])
+  // 接受删除：git rm -f —— 文件在工作区里（改过的那版），不加 -f 会被 git 拒绝。
+  assert.deepEqual(OPS.resolveDelete.argv({ path: 'a.txt' }), ['rm', '-f', '--', 'a.txt'])
+  // 路径放在 `--` 之后（pathspec 位置）：文件名长得像选项也不会被当成选项。
+  assert.deepEqual(OPS.resolveDelete.argv({ path: '--force' }), ['rm', '-f', '--', '--force'])
+  // 缺路径是可展示的中文错误，而不是把 undefined 拼进命令。
+  assert.throws(() => OPS.resolveKeep.argv({}), /缺少文件路径/)
+})
+
+// ── 「安全切分支」（stashSwitch）：脏工作区也能切分支 ──────────────────────
 // 与 stashPull 对称：git 的裸 switch 在脏工作区上会被拒绝（Your local changes
 // would be overwritten），这里做成 stash push -u → switch → stash pop。
 // 唯一不能退化的属性同样是「改动一件不少」。
