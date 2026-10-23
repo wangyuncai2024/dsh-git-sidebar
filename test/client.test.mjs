@@ -829,7 +829,7 @@ test('client standalone：runOp 失败时调用方拿到 ok:false（而不是 un
 // 修法：diff 内联在被点的那一行下面，与文件行共用清单这一个滚动区；清单本身
 // flex:0 0 auto（自带滚动，永不被压），展开期间把清单取景框放高。
 
-test('client standalone：点改动行会把 diff 升成一等表面（左列表｜右 diff），不再是清单里的一层', async () => {
+test('client standalone：点改动行进入整块 diff 表面（不再左右分栏），左上角返回回到点开之前', async () => {
   const repoState = {
     ok: true, dir: '/tmp/demo', isRepo: true, branch: 'main', upstream: 'origin/main',
     ahead: 0, behind: 0,
@@ -865,33 +865,64 @@ test('client standalone：点改动行会把 diff 升成一等表面（左列表
     '改动清单里不该内联 diff 了',
   )
 
+  /**
+   * 正文滚动区的 ref：真浏览器里由 React 把节点挂进 `ref.current`，假 React 只把
+   * ref 当普通 prop 存着 —— 测试因此可以自己把「一个可滚动的节点」塞进
+   * `ref.current`，用来验「返回时把清单滚回点开之前的位置」（见下面 scroll 那一段）。
+   */
+  const surfaceNode = flattenTree(initial).find((node) =>
+    node.props !== undefined && node.props.ref !== undefined && node.props.ref !== null
+    && typeof node.props.ref === 'object'
+    && typeof node.props.className === 'string' && node.props.className.includes('dgs-surface'))
+  assert.ok(surfaceNode !== undefined, '改动表面应持有正文滚动区的 ref')
+  const bodyRef = surfaceNode.props.ref
+  const bodyNode = { scrollTop: 42 }
+  bodyRef.current = bodyNode
+
   const clickable = flattenTree(initial).find((node) =>
     typeof node.props.title === 'string' && node.props.title.includes('点击查看 diff'))
   assert.ok(clickable !== undefined, '改动清单里应出现可点击的条目')
   await clickable.props.onClick()
   const opened = await react.settle()
 
-  // **diff 现在是一整块表面**：左列表｜右详情两栏（窄栏下由 CSS 退化成 push 导航）。
-  const split = findByClass(opened, 'dgs-split')
-  assert.ok(split !== undefined, 'diff 应当是 master/detail 两栏结构')
-  const detail = findByClass(opened, 'dgs-split-detail')
-  assert.ok(detail !== undefined, '应有右侧详情栏')
-  // diff 本体在**详情栏里**，不在改动清单的子树里。
-  const inline = flattenTree(detail).find((node) =>
+  // **diff 是一整块表面**：详情拿满整个宽度，改动清单整块让位 —— 不再有
+  // 「左列表 ｜ 右详情」两栏。分栏那一版把本就不宽的区域再分走一半给详情，
+  // 这正是要修掉的浪费（见 DiffSurface 的注释）。
+  const view = findByClass(opened, 'dgs-diff-view')
+  assert.ok(view !== undefined, 'diff 应当是一整块（dgs-diff-view）')
+  assert.equal(findByClass(opened, 'dgs-split'), undefined, '不该再有 master/detail 分栏容器')
+  assert.equal(findByClass(opened, 'dgs-split-list'), undefined, '不该再渲染左侧改动列表')
+  assert.equal(findByClass(opened, 'dgs-split-detail'), undefined, '不该再有独立的右侧详情栏')
+  // 一整块自己滚：它吃掉表面的剩余高度，diff 本体在它里面（唯一滚动区）。
+  assert.equal(view.props.style.flex, '1 1 0', 'diff 那一块要吃满剩余高度')
+  assert.equal(view.props.style.overflowY, 'auto', '滚动发生在这一块上（表面只有一个滚动区）')
+  const inline = flattenTree(view).find((node) =>
     node.type === 'pre' && textOf(node).includes('+two'))
-  assert.ok(inline !== undefined, 'diff 内容要渲染在详情栏里')
-  // 左栏列出改动，且当前这一行带高亮（用户要知道下面那块 diff 是谁的）。
-  const leftList = findByClass(opened, 'dgs-split-list')
-  assert.ok(leftList !== undefined, '应有左侧改动列表')
-  assert.ok(textOf(leftList).includes('b.txt'), '左栏要列出其它文件（一眼能换一个看）')
-  const active = flattenTree(leftList).find((node) =>
-    typeof node.props.className === 'string' && node.props.className.includes('dgs-rowitem-active'))
-  assert.ok(active !== undefined, '左栏里当前那一行要高亮')
+  assert.ok(inline !== undefined, 'diff 内容要渲染在这一整块里')
 
-  // 返回：收起 diff，回到清单。
+  // 左上角的返回按钮：抬头条里**第一个**控件，且这个表面只有它一个出口。
+  const crumbs = findByClass(opened, 'dgs-crumbs')
+  assert.ok(crumbs !== undefined, 'diff 顶部应有抬头条')
+  const firstButton = flattenTree(crumbs).find((node) => node.type === 'button')
+  assert.equal(textOf(firstButton), '‹ 改动', '返回按钮要在抬头条最左（面板左上角）')
+  assert.equal(firstButton.props.title, '返回改动清单', '返回按钮要说清它回哪儿')
+  assert.equal(findByClass(opened, 'dgs-diff-close'), undefined,
+    '分栏时代那颗同义的 ✕ 已删掉：一个表面只该有一个出口')
+  // 「未暂存 / 已暂存」两档跟着抬头条一起搬过来（同一个文件的两份 diff）。
+  const text = textOf(crumbs)
+  assert.ok(text.includes('未暂存') && text.includes('已暂存'), '两档切换要还在：' + text)
+
+  // 真浏览器里清单被卸载，回来是全新的滚动位置（scrollTop 归 0）——
+  // 这里手动归零，模拟「新元素从顶部开始」。
+  bodyNode.scrollTop = 0
+
+  // 返回：收起 diff，回到清单，**并且把滚动位置接回去**。
   await findButton(opened, '‹ 改动').props.onClick()
   const back = await react.settle()
-  assert.equal(findByClass(back, 'dgs-split'), undefined, '「‹ 改动」应把 diff 收起')
+  assert.equal(findByClass(back, 'dgs-diff-view'), undefined, '「‹ 改动」应把 diff 收起')
+  assert.ok(flattenTree(back).find((node) => node.props.key === 'changes') !== undefined,
+    '返回后应回到改动清单')
+  assert.equal(bodyNode.scrollTop, 42, '返回要回到点开之前滚到的位置（否则每次回来都在顶部）')
 })
 
 // ── 5. 回归：切换工作区后，面板上的东西必须跟着切 ───────────────────────────
@@ -3079,6 +3110,125 @@ test('client standalone：「提交并推送」是提交成功后的两步，ame
   assert.equal(commit.amend, true, '勾了「补充上次」就要带 amend')
   assert.ok(payloads.some((payload) => payload.op === 'push'), '提交成功后要接着推送')
   assert.ok(amendBox !== undefined)
+})
+
+// ── 8b. AI 生成提交信息：提交框右侧的方框按钮 ──────────────────────────────
+//
+// 这颗按钮的契约全部落在界面上看得见的地方：请求带对 dir/language/sessionId、
+// 生成期间转圈禁用、成功把文本填进输入框（不自动提交）、失败原因进命令结果栏
+// 且绝不碰用户已经写的字。位置本身也是契约：按钮与输入框是同一行的兄弟。
+
+/** 按 placeholder 找提交信息输入框（页面里 dgs-input 有好几个）。 */
+function commitInput(tree) {
+  return flattenTree(tree).find((node) =>
+    node.type === 'input' && node.props.placeholder === '填写提交信息…（回车直接提交）')
+}
+
+/** 找那颗生成按钮（按 aria-label：空闲与忙碌两态的 title 不同，aria-label 恒定）。 */
+function suggestButton(tree) {
+  return flattenTree(tree).find((node) =>
+    node.type === 'button' && node.props['aria-label'] === '生成提交信息')
+}
+
+test('client standalone：方框按钮生成提交信息 —— 请求带对参数、忙碌禁用、结果填进输入框', async () => {
+  const harness = makeFakeWindow({ stateResponse: REPO_WITH_CHANGES })
+  const base = harness.fetchStub
+  // 挂起生成响应：没有这道闸就抓不到「正在生成」那一帧（响应总是立刻回来的话，
+  // 界面直接从空闲跳到完成，忙碌态等于没被测过）。
+  let release = null
+  const pending = new Promise((resolve) => { release = resolve })
+  harness.fetchStub = async (url, init = {}) => {
+    if (!String(url).includes('/git-sidebar/suggest')) return base(url, init)
+    harness.calls.fetch.push({ url, init })
+    await pending
+    return {
+      status: 200,
+      json: async () => ({
+        ok: true, message: 'feat: 同步两处文件', provider: 'deepseek', model: 'deepseek-chat',
+      }),
+    }
+  }
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const initial = await react.settle()
+
+  // 位置契约：第一行 = [输入框, 方框按钮]（按钮在输入框右边），动作行在第二行。
+  const form = flattenTree(initial).find((node) => node.type === 'form')
+  assert.ok(form !== undefined, '仓库 + 改动表面应渲染提交表单')
+  const row = form.children[0]
+  assert.ok(Array.isArray(row.children), '提交表单第一行应该是一个容器')
+  assert.ok(row.children.some((node) => node.type === 'input'), '第一行里要有提交信息输入框')
+  const suggest = row.children.find((node) =>
+    node.type === 'button' && node.props['aria-label'] === '生成提交信息')
+  assert.ok(suggest !== undefined, '输入框右边应有「生成提交信息」的方框按钮（同一行的兄弟）')
+  assert.equal(suggest.props.type, 'button', '绝不能是 submit：点它不该顺手把提交也发出去')
+  assert.equal(suggest.props.disabled, false, '空闲时按钮可点')
+  assert.equal(textOf(suggest), '✨', '空闲态画 ✨；无障碍名称由 title / aria-label 给出')
+  assert.equal(suggest.props['aria-label'], '生成提交信息')
+  assert.ok(String(suggest.props.title).length > 0, '鼠标悬停要说明它会做什么')
+
+  const click = suggest.props.onClick()
+  const busy = await react.settle()
+  const busyButton = flattenTree(busy).find((node) => node.type === 'button' && node.props['aria-busy'] === 'true')
+  assert.ok(busyButton !== undefined, '生成期间按钮进入 aria-busy')
+  assert.equal(busyButton.props.disabled, true, '生成期间禁用：连点会出两份互相覆盖的草稿')
+  assert.ok(outputBars(busy).join('\n').includes('正在生成提交信息'), '过程要在命令结果栏里看得见')
+
+  release()
+  await click
+  const done = await react.settle()
+
+  const suggestCalls = harness.calls.fetch.filter((call) => String(call.url).includes('/git-sidebar/suggest'))
+  assert.equal(suggestCalls.length, 1, '一次点击只发一次生成请求')
+  assert.equal(suggestCalls[0].init.method, 'POST')
+  const payload = JSON.parse(suggestCalls[0].init.body)
+  assert.equal(payload.language, 'zh', '面板是中文界面，提示词按中文组')
+  assert.equal(payload.sessionId, 's1', '带上会话：宿主据此选「当前会话正在用的模型」')
+  assert.equal(payload.dir, '/tmp/demo', '带上仓库目录')
+
+  const filled = commitInput(done)
+  assert.equal(filled.props.value, 'feat: 同步两处文件', '生成结果填进输入框 —— 是草稿，不是自动提交')
+  const bars = outputBars(done).join('\n')
+  assert.ok(bars.includes('已生成提交信息'), '成功也要回报到命令结果栏')
+  assert.ok(bars.includes('deepseek/deepseek-chat'), '写明用了哪个模型，用户才知道这份草稿是谁写的')
+  const idle = suggestButton(done)
+  assert.ok(idle !== undefined && idle.props.disabled === false, '生成完按钮回到可点态（可以再生成一版）')
+})
+
+test('client standalone：生成提交信息失败时原因进结果栏，输入框里已写的字不能丢', async () => {
+  const harness = makeFakeWindow({ stateResponse: REPO_WITH_CHANGES })
+  const base = harness.fetchStub
+  harness.fetchStub = async (url, init = {}) => {
+    if (!String(url).includes('/git-sidebar/suggest')) return base(url, init)
+    harness.calls.fetch.push({ url, init })
+    return {
+      status: 400,
+      json: async () => ({ ok: false, message: '没有可提交的改动：先暂存或修改一些文件', state: null }),
+    }
+  }
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const initial = await react.settle()
+
+  // 用户先手写了一半 —— 失败路径绝不能覆盖 / 清空它。
+  const input = commitInput(initial)
+  assert.ok(input !== undefined, '应有提交信息输入框')
+  await input.props.onChange({ target: { value: '我先手写了一半' } })
+  const typed = await react.settle()
+
+  const suggest = suggestButton(typed)
+  assert.ok(suggest !== undefined, '应有生成按钮')
+  await suggest.props.onClick()
+  const failed = await react.settle()
+
+  const bars = outputBars(failed).join('\n')
+  assert.ok(bars.includes('生成提交信息失败：没有可提交的改动'),
+    '宿主的中文原因要原样出现在结果栏：' + bars)
+  assert.equal(commitInput(failed).props.value, '我先手写了一半', '失败不许动用户已经写的字')
+  const idle = suggestButton(failed)
+  assert.ok(idle !== undefined && idle.props.disabled === false, '失败后按钮必须回到可点态，否则重试无门')
 })
 
 test('client standalone：变基 / 浅克隆两个开关都要带进对应请求', async () => {

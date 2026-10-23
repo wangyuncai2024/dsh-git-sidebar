@@ -217,10 +217,10 @@ test('standalone：webServer / tools 就绪时，apply 直接注册成功', () =
   const harness = makeCtx()
   return import('../lib/index.js').then(({ apply }) => {
     assert.doesNotThrow(() => apply(harness.ctx, { logFile: tempLog }))
-    assert.equal(harness.routes.length, 6, '应注册 6 条路由（state/op/net/diag/log/help）')
+    assert.equal(harness.routes.length, 7, '应注册 7 条路由（state/op/suggest/net/diag/log/help）')
     assert.equal(harness.tools.length, 13, '应注册 13 个 git 工具')
     const paths = harness.routes.map((route) => route.path).sort()
-    assert.deepEqual(paths, ['/git-sidebar/diag', '/git-sidebar/help', '/git-sidebar/log', '/git-sidebar/net', '/git-sidebar/op', '/git-sidebar/state'])
+    assert.deepEqual(paths, ['/git-sidebar/diag', '/git-sidebar/help', '/git-sidebar/log', '/git-sidebar/net', '/git-sidebar/op', '/git-sidebar/state', '/git-sidebar/suggest'])
     for (const route of harness.routes) {
       assert.equal(route.kind, 'exact', `路由 ${route.path} 必须是 exact`)
       assert.equal(typeof route.handler, 'function', `路由 ${route.path} 必须有 handler`)
@@ -235,7 +235,7 @@ test('standalone：webServer / tools 稍后就绪时，apply 不抛异常且不�
   assert.equal(harness.routes.length, 0, '服务未就绪时不应有路由')
   assert.equal(harness.tools.length, 0, '服务未就绪时不应有工具')
   harness.flushInject()
-  assert.equal(harness.routes.length, 6, '服务就绪后应补上 6 条路由')
+  assert.equal(harness.routes.length, 7, '服务就绪后应补上 7 条路由')
   assert.equal(harness.tools.length, 13, '服务就绪后应补上 13 个工具')
 })
 
@@ -260,7 +260,7 @@ test('standalone：卸载会清空路由与工具（可重复 apply / dispose）
   const { apply } = await import('../lib/index.js')
   const harness = makeCtx()
   apply(harness.ctx, { logFile: tempLog })
-  assert.equal(harness.routes.length, 6)
+  assert.equal(harness.routes.length, 7)
   assert.equal(harness.tools.length, 13)
   harness.dispose()
   assert.equal(harness.routes.length, 0, '卸载后路由应被注销')
