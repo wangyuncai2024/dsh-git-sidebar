@@ -138,15 +138,23 @@ DSH 的右侧栏标签是**三段式注册**，缺一不可：
 
 三段必须用**同一个 id**，所以它在 `lib/client.js` 里只写一次（`GIT_TAB_ID`）。
 `id` 取包名（官方那几个标签也这么做），因为它在**所有注册里必须全局唯一**；
-`kind` 才是 `openTab('git')` 用来点名类型的判别子。
+`kind` 才是 `openTab('dsh-git-sidebar')` 用来点名类型的判别子。
 
 关键常量（`lib/client.js` 顶部）：
 
 ```js
-const GIT_TAB_ID = 'dsh-git-sidebar'   // 全局唯一，也是两个 keyed 插槽的 key
-const GIT_TAB_KIND = 'git'             // openTab('git') 用
-const GIT_TAB_PRIORITY = 'extension'   // 产品之外的插件用这一档（也是最高档）
+const GIT_TAB_ID = 'dsh-git-sidebar'       // 全局唯一，也是两个 keyed 插槽的 key
+const GIT_TAB_KIND = 'dsh-git-sidebar'     // openTab('dsh-git-sidebar') 用
+const GIT_TAB_PRIORITY = 'extension'       // 产品之外的插件用这一档（也是最高档）
 ```
+
+> `kind` 为什么不用短名 `'git'`：宿主的类型注册表里**同一 kind 在同一优先级档
+> 只有一个名额**，而 dsh-better-sidebar 的「改动」标签也注册 `kind: 'git'` +
+> `extension`——后注册者抛 `tab kind "git" is already registered (extension)`，
+> 它的 native 注册失败会在页面上钉一条红色诊断条（本插件 v0.3.0 之前就撞过）。
+> 短名 `'git'` 是被多方盯上的热门词，谁先注册谁占坑、加载顺序一变就换输家；
+> 全限定名天然全局唯一，一次注册永久不撞。kind 对用户不可见（chip 文字来自
+> `title()`，guide 文字来自 guide 数组），写长没有界面成本。
 
 需要声明的客户端服务：
 
@@ -160,7 +168,7 @@ const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'uiWorkspace']
 > 在插件上下文里读不到。这与 `uiWorkspace` 是同一个坑。
 
 「设置 → 通用 → Git 面板」那一行里还有个「打开」按钮，走
-`ctx.sidebarRight.openTab('git')`——它同时会把右侧栏展开（内容看不见就不算打开）。
+`ctx.sidebarRight.openTab('dsh-git-sidebar')`——它同时会把右侧栏展开（内容看不见就不算打开）。
 
 ---
 

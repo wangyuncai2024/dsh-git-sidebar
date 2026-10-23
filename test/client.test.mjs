@@ -472,7 +472,7 @@ function makeTabRegistry(options = {}) {
   return {
     posted,
     register(definition) {
-      if (options.alwaysFails === true) throw new Error('tab kind "git" is already registered in the "extension" band')
+      if (options.alwaysFails === true) throw new Error('tab kind "dsh-git-sidebar" is already registered in the "extension" band')
       if (ids.has(definition.id)) throw new Error(`tab type id "${definition.id}" is already in use`)
       if (kinds.has(definition.kind)) throw new Error(`tab kind "${definition.kind}" is already registered at this band`)
       ids.add(definition.id)
@@ -528,7 +528,7 @@ test('client standalone：标签类型注册进 registry，kind / id / priority 
   assert.equal(tabs.posted.length, 1, '必须恰好注册一个标签类型')
   const def = tabs.posted[0]
   assert.equal(def.id, 'dsh-git-sidebar', 'id 用包名（要与两个 keyed 插槽的 key 一致）')
-  assert.equal(def.kind, 'git', 'kind 是 openTab 用的判别子')
+  assert.equal(def.kind, 'dsh-git-sidebar', 'kind 是 openTab 用的判别子（全限定名，避开与其他 Git 插件的 kind 撞车）')
   assert.equal(def.priority, 'extension', '第三方插件用 extension 档（也是最高档）')
   assert.equal(typeof def.title, 'function', 'title 必须是函数（thunk，每次投影重读）')
   assert.equal(def.title(), 'Git')
@@ -647,7 +647,7 @@ test('client standalone：「打开」按钮走 ctx.sidebarRight.openTab(kind)',
   const open = collectButtons(tree).find((b) => textOf(b) === '打开')
   assert.ok(open !== undefined, '设置行里应当有「打开」按钮')
   open.props.onClick()
-  assert.deepEqual(sidebarRight.opened, ['git'], '点「打开」要按 kind 开一个 Git 标签')
+  assert.deepEqual(sidebarRight.opened, ['dsh-git-sidebar'], '点「打开」要按 kind 开一个 Git 标签')
   const stage = harness.calls.diag.find((entry) => entry.stage === 'open-tab:ok')
   assert.ok(stage !== undefined, '打开成功要留诊断痕迹')
 })
@@ -657,7 +657,7 @@ test('client standalone：openTab 抛异常时留诊断、不炸设置页', () =
   const react = makeFakeReact()
   const { exports } = evaluateBundle(harness, react.api)
   const { slots, registered } = makeSlots()
-  exports.apply({ slots, sidebarRight: { openTab() { throw new Error('sidebarRight: no tab type is registered as "git"') } } })
+  exports.apply({ slots, sidebarRight: { openTab() { throw new Error('sidebarRight: no tab type is registered as "dsh-git-sidebar"') } } })
   const toggle = registered.find((entry) => entry.options.name === 'settings.general.item').component
   const tree = renderComponent(harness, react, toggle, {})
   const open = collectButtons(tree).find((b) => textOf(b) === '打开')
