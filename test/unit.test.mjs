@@ -714,6 +714,27 @@ test('buildOpArgv：提交详情带 --stat 与完整作者信息，并走本地�
   await assert.rejects(() => buildOpArgv('show', {}), /提交号/)
 })
 
+test('buildOpArgv：提交里单个文件的 diff（showFile）—— --format= 抹头、路径走 `--` 之后', async () => {
+  const argv = await buildOpArgv('showFile', { ref: 'abc1234', paths: ['lib/client.js'] })
+  // 与 show 同一套安全形状：--end-of-options 挡住「提交号被拼成旗标」，路径放在
+  // `--` 之后的 pathspec 位置（文件名再怪也不会被解析成选项）。--format= 抹掉
+  // 提交头 —— 详情上方已经画过一遍，stdout 里只剩这个文件的 patch。
+  assert.deepEqual(argv,
+    ['show', '--no-color', '--format=', '--end-of-options', 'abc1234', '--', 'lib/client.js'])
+  assert.equal(opTimeoutMs(OPS.showFile), GIT_LOCAL_TIMEOUT_MS, '本地查询走本地超时档')
+
+  // 改名的文件要一次传两条路径（客户端把 stat 里的 `{old => new}` 展开好了）：
+  // 只给旧名匹配不上新文件，只给新名会把 rename 拆成「删旧 + 加新」两段。
+  assert.deepEqual(
+    await buildOpArgv('showFile', { ref: 'abc1234', paths: ['lib/old.js', 'lib/new.js'] }),
+    ['show', '--no-color', '--format=', '--end-of-options', 'abc1234', '--', 'lib/old.js', 'lib/new.js'])
+
+  // 缺提交号 / 缺路径当场拒绝（面板直接展示中文原因，不会跑一条残缺命令）。
+  await assert.rejects(() => buildOpArgv('showFile', { paths: ['a.txt'] }), /提交号/)
+  await assert.rejects(() => buildOpArgv('showFile', { ref: 'abc1234' }), /文件路径/)
+  await assert.rejects(() => buildOpArgv('showFile', { ref: 'abc1234', paths: ['  '] }), /文件路径/)
+})
+
 test('buildOpArgv：stash 应用/删除只接受 stash@{n} 形态的编号', async () => {
   assert.deepEqual(await buildOpArgv('stashApply', { ref: 'stash@{0}' }), ['stash', 'apply', 'stash@{0}'])
   assert.deepEqual(await buildOpArgv('stashDrop', { ref: 'stash@{12}' }), ['stash', 'drop', 'stash@{12}'])

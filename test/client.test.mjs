@@ -2959,6 +2959,157 @@ test('client standalone：点最近提交的一行，把提交号交给宿主并
   assert.ok(!textOf(closed).includes('Author: 张三'), '再点同一行应收起详情')
 })
 
+// ── 提交详情的变动文件列表：点一个文件看它在这条提交里的 diff ────────────────
+//
+// 现场：详情里那块 `路径 | 行数` 此前只是一段纯文本，想知道「这个文件到底改了什么」
+// 只能去终端。现在那几行可点：点开就在这一行下面长出这个文件自己的 patch。
+
+/** 一份贴近真实 `git show --stat --format=fuller` 的详情文本（空行锚点 + 收尾句都在）。 */
+const SHOW_WITH_STAT = [
+  'commit abc1234',
+  'Author:     张三 <z@example.com>',
+  'AuthorDate: Fri Oct 23 23:34:50 2026 +0800',
+  'Commit:     张三 <z@example.com>',
+  'CommitDate: Fri Oct 23 23:34:50 2026 +0800',
+  '',
+  '    第一次提交',
+  '',
+  ' f.txt    |  2 +-',
+  ' lib/a.js | 16 +++++++++++++---',
+  ' 2 files changed, 16 insertions(+), 2 deletions(-)',
+].join('\n')
+
+/** 树里那些「变动文件行」（可点的 diffstat 行）。 */
+function statRows(tree) {
+  return flattenTree(tree).filter((node) =>
+    node !== null && typeof node === 'object' && node.props !== undefined
+    && typeof node.props.className === 'string' && node.props.className.includes('dgs-statrow'))
+}
+
+test('client standalone：提交详情的变动文件行可点，点开渲染这个文件的 diff（再点收起）', async () => {
+  const harness = makeFakeWindow({
+    stateResponse: REPO_WITH_CHANGES,
+    opResponses: {
+      show: { ok: true, show: SHOW_WITH_STAT, state: null },
+      showFile: {
+        ok: true,
+        showFile: 'diff --git a/lib/a.js b/lib/a.js\n@@ -1,2 +1,3 @@\n-old line\n+new line\n context',
+        state: null,
+      },
+    },
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const initial = await openHistory(await react.settle(), react)
+
+  const row = flattenTree(initial).find((node) =>
+    node !== null && typeof node === 'object' && node.props !== undefined
+    && typeof node.props.onClick === 'function' && textOf(node) === 'abc1234第一次提交切到此')
+  assert.ok(row !== undefined, '提交行本身要可点')
+  await row.props.onClick()
+  const detail = await react.settle()
+
+  // 提交信息照旧渲染；那块 diffstat 变成两行可点的文件行（收尾那句保留为纯文本）。
+  assert.ok(textOf(detail).includes('第一次提交'), '提交信息照旧在详情里')
+  const rows = statRows(detail)
+  assert.equal(rows.length, 2, 'diffstat 里的两个文件都要变成可点的行：' + textOf(detail).slice(-200))
+  assert.ok(textOf(rows[0]).includes('f.txt'), '第一行是 f.txt（保持 git 的顺序）')
+  assert.ok(textOf(detail).includes('2 files changed'), '收尾那句统计照旧显示')
+
+  // 点 lib/a.js → 向宿主要**这一个文件**的 diff，就地渲染。
+  const target = rows.find((node) => textOf(node).includes('lib/a.js'))
+  await target.props.onClick()
+  const opened = await react.settle()
+
+  const payload = opPayloads(harness).find((item) => item.op === 'showFile')
+  assert.ok(payload !== undefined, '点变动文件行应 POST op=showFile')
+  assert.equal(payload.ref, 'abc1234', '要带上这条提交的提交号')
+  assert.deepEqual(payload.paths, ['lib/a.js'], '路径作为 pathspec 交给宿主')
+  assert.equal(payload.noState, true, '数据型操作不该让宿主回读仓库状态')
+  assert.ok(textOf(opened).includes('+new line'), '这个文件的 diff 要渲染出来：' + textOf(opened).slice(-200))
+
+  // 再点同一行：收起这个文件的 diff（文件列表本身不动）。
+  const targetAgain = statRows(opened).find((node) => textOf(node).includes('lib/a.js'))
+  await targetAgain.props.onClick()
+  const closed = await react.settle()
+  assert.ok(!textOf(closed).includes('+new line'), '再点同一行应收起这个文件的 diff')
+  assert.ok(textOf(closed).includes('lib/a.js'), '文件列表本身还在（只是收起了 diff）')
+})
+
+test('client standalone：改名的文件行把 {old => new} 展开成新旧两条路径一起传', async () => {
+  const renameShow = [
+    'commit abc1234',
+    'Author:     李四 <l@example.com>',
+    '',
+    '    改名：client.js → panel.js',
+    '',
+    ' lib/{client.js => panel.js} | 4 ++--',
+    ' 1 file changed, 2 insertions(+), 2 deletions(-)',
+  ].join('\n')
+  const harness = makeFakeWindow({
+    stateResponse: REPO_WITH_CHANGES,
+    opResponses: {
+      show: { ok: true, show: renameShow, state: null },
+      showFile: {
+        ok: true,
+        showFile: 'diff --git a/lib/client.js b/lib/panel.js\nsimilarity index 80%',
+        state: null,
+      },
+    },
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const initial = await openHistory(await react.settle(), react)
+
+  const row = flattenTree(initial).find((node) =>
+    node !== null && typeof node === 'object' && node.props !== undefined
+    && typeof node.props.onClick === 'function' && textOf(node) === 'abc1234第一次提交切到此')
+  await row.props.onClick()
+  const detail = await react.settle()
+
+  const rows = statRows(detail)
+  assert.equal(rows.length, 1, '改名行也要变成可点的行：' + textOf(detail).slice(-200))
+  await rows[0].props.onClick()
+  await react.settle()
+
+  const payload = opPayloads(harness).find((item) => item.op === 'showFile')
+  assert.ok(payload !== undefined, '点改名行应 POST op=showFile')
+  assert.deepEqual(payload.paths, ['lib/client.js', 'lib/panel.js'],
+    '新旧两条路径一起传：只给旧名匹配不上新文件，只给新名会把 rename 拆成删旧+加新')
+})
+
+test('client standalone：提交信息里像 diffstat 的竖线行不会被当成变动文件', async () => {
+  // 消息行以四格缩进开头、也可能含 `| 3 +-` 这样的字样：解析必须只认 diffstat 块
+  // （锚定在收尾句与它上方的空行），绝不能把提交信息当文件列表。
+  const trickyShow = [
+    'commit abc1234',
+    'Author:     张三 <z@example.com>',
+    '',
+    '    fix: a | 3 +- 看起来像 diffstat的消息行',
+  ].join('\n')
+  const harness = makeFakeWindow({
+    stateResponse: REPO_WITH_CHANGES,
+    opResponses: {
+      show: { ok: true, show: trickyShow, state: null },
+    },
+  })
+  const react = makeStatefulReact()
+  const { exports } = evaluateBundle(harness, react.api)
+  mountPanel(exports, react, sessionStore({ s1: { cwd: '/tmp/demo' } }))
+  const initial = await openHistory(await react.settle(), react)
+
+  const row = flattenTree(initial).find((node) =>
+    node !== null && typeof node === 'object' && node.props !== undefined
+    && typeof node.props.onClick === 'function' && textOf(node) === 'abc1234第一次提交切到此')
+  await row.props.onClick()
+  const detail = await react.settle()
+
+  assert.ok(textOf(detail).includes('fix: a | 3 +-'), '详情照原样整段渲染：' + textOf(detail).slice(-200))
+  assert.equal(statRows(detail).length, 0, '消息行绝不能被解析成变动文件行')
+})
+
 test('client standalone：「切到此」点确认后走 stashSwitch 并带上提交号，不影响整行看详情', async () => {
   const harness = makeFakeWindow({
     stateResponse: REPO_WITH_CHANGES,
